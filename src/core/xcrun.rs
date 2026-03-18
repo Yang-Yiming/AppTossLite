@@ -51,7 +51,7 @@ struct HardwareProperties {
 #[serde(rename_all = "camelCase")]
 struct ConnectionProperties {
     #[serde(default)]
-    tunnel_state: String,
+    pairing_state: String,
 }
 
 pub fn list_devices() -> Result<Vec<Device>> {
@@ -78,9 +78,9 @@ pub fn list_devices() -> Result<Vec<Device>> {
         .devices
         .into_iter()
         .map(|d| {
-            let state = match d.connection_properties.tunnel_state.as_str() {
-                "connected" => DeviceState::Connected,
-                "disconnected" => DeviceState::Disconnected,
+            let state = match d.connection_properties.pairing_state.as_str() {
+                "paired" => DeviceState::Connected,
+                "unpaired" => DeviceState::Disconnected,
                 other => DeviceState::Unknown(other.to_string()),
             };
             let model = d
