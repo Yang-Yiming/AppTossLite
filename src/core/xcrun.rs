@@ -190,6 +190,7 @@ pub fn build_for_device(
             "-destination",
             &destination,
             "-allowProvisioningUpdates",
+            "-allowProvisioningDeviceRegistration",
         ])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
