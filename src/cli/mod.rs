@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod config;
 pub mod devices;
 pub mod projects;
 
@@ -26,26 +27,31 @@ pub enum Commands {
         #[command(subcommand)]
         action: ProjectsAction,
     },
+    /// Manage toss configuration
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Install an app onto a device
     Install {
-        /// Project alias
-        project: String,
+        /// Project alias (uses default if omitted)
+        project: Option<String>,
         /// Device alias, UDID, or index
         #[arg(short, long)]
         device: Option<String>,
     },
     /// Launch an app on a device
     Launch {
-        /// Project alias
-        project: String,
+        /// Project alias (uses default if omitted)
+        project: Option<String>,
         /// Device alias, UDID, or index
         #[arg(short, long)]
         device: Option<String>,
     },
     /// Install and launch an app (build → deploy → run)
     Run {
-        /// Project alias
-        project: String,
+        /// Project alias (uses default if omitted)
+        project: Option<String>,
         /// Device alias, UDID, or index
         #[arg(short, long)]
         device: Option<String>,
@@ -65,9 +71,9 @@ pub enum DevicesAction {
 
 #[derive(Subcommand)]
 pub enum ProjectsAction {
-    /// Register a project build directory
+    /// Register a project (source dir with .xcodeproj, build dir, or .app path)
     Add {
-        /// Path to the build directory containing the .app bundle
+        /// Path to project source directory, build directory, or .app bundle
         path: String,
         /// Alias for the project
         #[arg(long)]
@@ -79,6 +85,26 @@ pub enum ProjectsAction {
     Remove {
         /// Project alias to remove
         alias: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Show the current configuration
+    Show,
+    /// Print the config file path
+    Path,
+    /// Set the default device
+    #[command(name = "set-default-device")]
+    SetDefaultDevice {
+        /// Device alias or UDID
+        name: String,
+    },
+    /// Set the default project
+    #[command(name = "set-default-project")]
+    SetDefaultProject {
+        /// Project alias
+        name: String,
     },
 }
 
@@ -99,12 +125,24 @@ pub fn dispatch(command: Commands) -> Result<()> {
             ProjectsAction::List => projects::list(&config),
             ProjectsAction::Remove { alias } => projects::remove(&mut config, &alias),
         },
+        Commands::Config { action } => match action {
+            ConfigAction::Show => config::show(&config),
+            ConfigAction::Path => config::path(),
+            ConfigAction::SetDefaultDevice { name } => {
+                config::set_default_device(&mut config, &name)
+            }
+            ConfigAction::SetDefaultProject { name } => {
+                config::set_default_project(&mut config, &name)
+            }
+        },
         Commands::Install { project, device } => {
-            actions::install(&config, &project, device.as_deref())
+            actions::install(&config, project.as_deref(), device.as_deref())
         }
         Commands::Launch { project, device } => {
-            actions::launch(&config, &project, device.as_deref())
+            actions::launch(&config, project.as_deref(), device.as_deref())
         }
-        Commands::Run { project, device } => actions::run(&config, &project, device.as_deref()),
+        Commands::Run { project, device } => {
+            actions::run(&config, project.as_deref(), device.as_deref())
+        }
     }
 }

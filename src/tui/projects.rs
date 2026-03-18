@@ -41,7 +41,7 @@ fn list(config: &Config) -> Result<()> {
 
 fn add(config: &mut Config) -> Result<()> {
     let path: String = Input::new()
-        .with_prompt("Build directory path")
+        .with_prompt("Project path (source dir, build dir, or .app)")
         .interact_text()
         .map_err(|e| TossError::UserCancelled(e.to_string()))?;
 

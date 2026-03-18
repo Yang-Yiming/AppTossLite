@@ -9,9 +9,19 @@ use super::error::{Result, TossError};
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub defaults: DefaultsConfig,
+    #[serde(default)]
     pub devices: DevicesConfig,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectConfig>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct DefaultsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

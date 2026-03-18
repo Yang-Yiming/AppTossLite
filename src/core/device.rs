@@ -57,7 +57,7 @@ pub fn resolve_device_id(identifier: &str, config: &Config, devices: &[Device]) 
     )))
 }
 
-/// Select a device: auto if one connected, prompt if multiple, error if none.
+/// Select a device: explicit flag → default → auto if one connected → prompt if multiple → error.
 pub fn select_device(
     device_flag: Option<&str>,
     config: &Config,
@@ -66,6 +66,11 @@ pub fn select_device(
     // If user specified a device, resolve it
     if let Some(id) = device_flag {
         return resolve_device_id(id, config, devices);
+    }
+
+    // Try the configured default device
+    if let Some(ref default_device) = config.defaults.device {
+        return resolve_device_id(default_device, config, devices);
     }
 
     let connected: Vec<&Device> = devices

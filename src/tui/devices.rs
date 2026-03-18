@@ -69,10 +69,22 @@ fn alias(config: &mut Config) -> Result<()> {
     // Verify the device resolves correctly
     resolve_device_id(udid, config, &devices)?;
 
+    let is_first = config.devices.aliases.is_empty();
+
     config.devices.aliases.insert(name.clone(), udid.clone());
+
+    // Auto-set default if this is the first alias
+    if is_first {
+        config.defaults.device = Some(name.clone());
+    }
+
     config.save()?;
 
     let device_name = &connected[selection].name;
     println!("Aliased '{}' → {} ({})", name, device_name, udid);
+    if is_first {
+        let dim = console::Style::new().dim();
+        println!("{}", dim.apply_to("  (set as default device)"));
+    }
     Ok(())
 }
