@@ -1,0 +1,80 @@
+use console::Style;
+use dialoguer::{Input, Select};
+
+use crate::core::config::Config;
+use crate::core::error::{Result, TossError};
+
+pub fn menu(config: &mut Config) -> Result<()> {
+    loop {
+        let items = &["List projects", "Add project", "Remove project", "Back"];
+
+        let selection = Select::new()
+            .with_prompt("Projects")
+            .items(items)
+            .default(0)
+            .interact()
+            .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+
+        match selection {
+            0 => list(config)?,
+            1 => {
+                if let Err(e) = add(config) {
+                    let red = Style::new().red().bold();
+                    eprintln!("{} {}", red.apply_to("error:"), e);
+                }
+            }
+            2 => {
+                if let Err(e) = remove(config) {
+                    let red = Style::new().red().bold();
+                    eprintln!("{} {}", red.apply_to("error:"), e);
+                }
+            }
+            3 => return Ok(()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn list(config: &Config) -> Result<()> {
+    crate::cli::projects::list(config)
+}
+
+fn add(config: &mut Config) -> Result<()> {
+    let path: String = Input::new()
+        .with_prompt("Build directory path")
+        .interact_text()
+        .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+
+    let alias: String = Input::new()
+        .with_prompt("Project alias (leave empty for auto)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+
+    let alias_opt = if alias.is_empty() {
+        None
+    } else {
+        Some(alias.as_str())
+    };
+
+    crate::cli::projects::add(config, &path, alias_opt)
+}
+
+fn remove(config: &mut Config) -> Result<()> {
+    if config.projects.is_empty() {
+        println!("No projects registered.");
+        return Ok(());
+    }
+
+    let names: Vec<&String> = config.projects.keys().collect();
+
+    let selection = Select::new()
+        .with_prompt("Select project to remove")
+        .items(&names)
+        .default(0)
+        .interact()
+        .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+
+    let alias = names[selection].clone();
+    crate::cli::projects::remove(config, &alias)
+}

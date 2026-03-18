@@ -11,7 +11,7 @@ use crate::core::error::Result;
 #[command(name = "toss", version, about = "Deploy iOS apps to connected devices")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -82,10 +82,10 @@ pub enum ProjectsAction {
     },
 }
 
-pub fn dispatch(cli: Cli) -> Result<()> {
+pub fn dispatch(command: Commands) -> Result<()> {
     let mut config = Config::load()?;
 
-    match cli.command {
+    match command {
         Commands::Devices { action } => match action {
             None => devices::list(&config),
             Some(DevicesAction::Alias { device, name }) => {
@@ -105,8 +105,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Commands::Launch { project, device } => {
             actions::launch(&config, &project, device.as_deref())
         }
-        Commands::Run { project, device } => {
-            actions::run(&config, &project, device.as_deref())
-        }
+        Commands::Run { project, device } => actions::run(&config, &project, device.as_deref()),
     }
 }

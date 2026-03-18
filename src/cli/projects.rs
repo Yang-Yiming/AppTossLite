@@ -7,10 +7,7 @@ use crate::core::project::{extract_bundle_id, find_app_in_dir};
 pub fn add(config: &mut Config, path: &str, alias: Option<&str>) -> Result<()> {
     let build_dir = PathBuf::from(path);
     if !build_dir.is_dir() {
-        return Err(TossError::Project(format!(
-            "'{}' is not a directory",
-            path
-        )));
+        return Err(TossError::Project(format!("'{}' is not a directory", path)));
     }
 
     // Derive alias from directory name if not provided

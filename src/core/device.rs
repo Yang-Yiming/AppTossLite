@@ -28,11 +28,7 @@ impl std::fmt::Display for DeviceState {
 }
 
 /// Resolve a device identifier: could be an alias, UDID, or index into the device list.
-pub fn resolve_device_id(
-    identifier: &str,
-    config: &Config,
-    devices: &[Device],
-) -> Result<String> {
+pub fn resolve_device_id(identifier: &str, config: &Config, devices: &[Device]) -> Result<String> {
     // Check alias first
     if let Some(udid) = config.devices.aliases.get(identifier) {
         return Ok(udid.clone());
