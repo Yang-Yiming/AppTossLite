@@ -173,6 +173,8 @@ pub fn build_for_device(
     scheme: &str,
     device_id: &str,
 ) -> Result<()> {
+    use std::process::Stdio;
+
     let project_flag = if is_workspace { "-workspace" } else { "-project" };
     let destination = format!("platform=iOS,id={}", device_id);
 
@@ -186,6 +188,8 @@ pub fn build_for_device(
             &destination,
             "-allowProvisioningUpdates",
         ])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .status()?;
 
     if !status.success() {
