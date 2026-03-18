@@ -199,26 +199,12 @@ pub fn build_for_device(
         .spawn()?;
 
     if !verbose {
-        // Capture and filter output in quiet mode
+        // Silently consume output in quiet mode
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
-            let mut last_lines: Vec<String> = Vec::new();
-
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    // Keep only last 3 lines
-                    last_lines.push(line.clone());
-                    if last_lines.len() > 3 {
-                        last_lines.remove(0);
-                    }
-
-                    // Print and update in place
-                    print!("\r\x1B[K{}", last_lines.join(" | "));
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
-                }
+            for _ in reader.lines() {
+                // Discard all output
             }
-            println!(); // New line after build
         }
     }
 
@@ -226,6 +212,10 @@ pub fn build_for_device(
 
     if !status.success() {
         return Err(TossError::Xcrun("xcodebuild failed".into()));
+    }
+
+    if !verbose {
+        println!("BUILD SUCCEEDED");
     }
 
     Ok(())
