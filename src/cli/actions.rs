@@ -65,6 +65,7 @@ pub fn install(
     project: Option<&str>,
     device: Option<&str>,
     prebuilt: bool,
+    verbose: bool,
 ) -> Result<()> {
     let project_name = resolve_project_arg(config, project)?;
     let bold = Style::new().bold();
@@ -94,7 +95,7 @@ pub fn install(
             .unwrap_or(&device_id);
 
         println!("Building {}...", bold.apply_to(&scheme));
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid)?;
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid, verbose)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
         let build_dir = if build_dirs.len() == 1 {
@@ -170,6 +171,7 @@ pub fn run(
     project: Option<&str>,
     device: Option<&str>,
     prebuilt: bool,
+    verbose: bool,
 ) -> Result<()> {
     let project_name = resolve_project_arg(config, project)?;
     let bold = Style::new().bold();
@@ -202,7 +204,7 @@ pub fn run(
             .unwrap_or(&device_id);
 
         println!("Building {}...", bold.apply_to(&scheme));
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid)?;
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid, verbose)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
         let build_dir = if build_dirs.len() == 1 {

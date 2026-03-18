@@ -33,7 +33,7 @@ fn select_project(config: &Config) -> Result<String> {
     Ok(names[selection].clone())
 }
 
-fn select_device(_config: &Config) -> Result<(String, String)> {
+fn select_device(_config: &Config) -> Result<(String, String, String)> {
     use crate::core::device::DeviceState;
 
     let devices = xcrun::list_devices()?;
@@ -49,7 +49,11 @@ fn select_device(_config: &Config) -> Result<(String, String)> {
     }
 
     if connected.len() == 1 {
-        return Ok((connected[0].identifier.clone(), connected[0].name.clone()));
+        return Ok((
+            connected[0].identifier.clone(),
+            connected[0].udid.clone(),
+            connected[0].name.clone(),
+        ));
     }
 
     let items: Vec<String> = connected
@@ -66,6 +70,7 @@ fn select_device(_config: &Config) -> Result<(String, String)> {
 
     Ok((
         connected[selection].identifier.clone(),
+        connected[selection].udid.clone(),
         connected[selection].name.clone(),
     ))
 }
@@ -81,10 +86,10 @@ pub fn install(config: &Config) -> Result<()> {
         let (project_path, is_workspace) = find_xcode_project(&source_path)?;
         let schemes = list_schemes(&project_path, is_workspace)?;
         let scheme = select_scheme(schemes)?;
-        let (device_id, _device_name) = select_device(config)?;
+        let (_device_id, device_udid, _device_name) = select_device(config)?;
 
         println!("Building {}...", bold.apply_to(&scheme));
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_id)?;
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_udid, false)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
         let build_dir = if build_dirs.len() == 1 {
@@ -109,7 +114,7 @@ pub fn install(config: &Config) -> Result<()> {
         app_path
     };
 
-    let (device_id, device_name) = select_device(config)?;
+    let (device_id, _device_udid, device_name) = select_device(config)?;
 
     println!(
         "Installing {} → {}...",
@@ -129,7 +134,7 @@ pub fn launch(config: &Config) -> Result<()> {
 
     let project_name = select_project(config)?;
     let (_app_path, bundle_id) = resolve_project(config, &project_name)?;
-    let (device_id, device_name) = select_device(config)?;
+    let (device_id, _device_udid, device_name) = select_device(config)?;
 
     let bold = Style::new().bold();
     println!(
@@ -156,10 +161,10 @@ pub fn run(config: &Config) -> Result<()> {
         let (project_path, is_workspace) = find_xcode_project(&source_path)?;
         let schemes = list_schemes(&project_path, is_workspace)?;
         let scheme = select_scheme(schemes)?;
-        let (device_id, device_name) = select_device(config)?;
+        let (device_id, device_udid, device_name) = select_device(config)?;
 
         println!("Building {}...", bold.apply_to(&scheme));
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_id)?;
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_udid, false)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
         let build_dir = if build_dirs.len() == 1 {
@@ -183,7 +188,7 @@ pub fn run(config: &Config) -> Result<()> {
         // Use prebuilt
         use crate::core::project::resolve_project;
         let (app_path, bundle_id) = resolve_project(config, &project_name)?;
-        let (device_id, device_name) = select_device(config)?;
+        let (device_id, _device_udid, device_name) = select_device(config)?;
         (app_path, bundle_id, device_id, device_name)
     };
 

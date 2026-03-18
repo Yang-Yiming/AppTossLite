@@ -175,13 +175,15 @@ pub fn build_for_device(
     is_workspace: bool,
     scheme: &str,
     device_udid: &str,
+    verbose: bool,
 ) -> Result<()> {
+    use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
     let project_flag = if is_workspace { "-workspace" } else { "-project" };
     let destination = format!("platform=iOS,id={}", device_udid);
 
-    let status = Command::new("xcodebuild")
+    let mut child = Command::new("xcodebuild")
         .args([
             project_flag,
             &project_path.to_string_lossy(),
@@ -192,9 +194,35 @@ pub fn build_for_device(
             "-allowProvisioningUpdates",
             "-allowProvisioningDeviceRegistration",
         ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+        .stdout(if verbose { Stdio::inherit() } else { Stdio::piped() })
+        .stderr(if verbose { Stdio::inherit() } else { Stdio::piped() })
+        .spawn()?;
+
+    if !verbose {
+        // Capture and filter output in quiet mode
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            let mut last_lines: Vec<String> = Vec::new();
+
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    // Keep only last 3 lines
+                    last_lines.push(line.clone());
+                    if last_lines.len() > 3 {
+                        last_lines.remove(0);
+                    }
+
+                    // Print and update in place
+                    print!("\r\x1B[K{}", last_lines.join(" | "));
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                }
+            }
+            println!(); // New line after build
+        }
+    }
+
+    let status = child.wait()?;
 
     if !status.success() {
         return Err(TossError::Xcrun("xcodebuild failed".into()));

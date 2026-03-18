@@ -42,6 +42,9 @@ pub enum Commands {
         /// Use pre-built .app from build_dir instead of building from source
         #[arg(long)]
         prebuilt: bool,
+        /// Show full xcodebuild output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Launch an app on a device
     Launch {
@@ -61,6 +64,9 @@ pub enum Commands {
         /// Use pre-built .app from build_dir instead of building from source
         #[arg(long)]
         prebuilt: bool,
+        /// Show full xcodebuild output
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -141,14 +147,14 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 config::set_default_project(&mut config, &name)
             }
         },
-        Commands::Install { project, device, prebuilt } => {
-            actions::install(&config, project.as_deref(), device.as_deref(), prebuilt)
+        Commands::Install { project, device, prebuilt, verbose } => {
+            actions::install(&config, project.as_deref(), device.as_deref(), prebuilt, verbose)
         }
         Commands::Launch { project, device } => {
             actions::launch(&config, project.as_deref(), device.as_deref())
         }
-        Commands::Run { project, device, prebuilt } => {
-            actions::run(&config, project.as_deref(), device.as_deref(), prebuilt)
+        Commands::Run { project, device, prebuilt, verbose } => {
+            actions::run(&config, project.as_deref(), device.as_deref(), prebuilt, verbose)
         }
     }
 }
