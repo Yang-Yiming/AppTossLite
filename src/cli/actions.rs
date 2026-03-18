@@ -87,9 +87,14 @@ pub fn install(
 
         let devices = xcrun::list_devices()?;
         let device_id = select_device(device, config, &devices)?;
+        let device_udid = devices
+            .iter()
+            .find(|d| d.identifier == device_id)
+            .map(|d| d.udid.as_str())
+            .unwrap_or(&device_id);
 
         println!("Building {}...", bold.apply_to(&scheme));
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_id)?;
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
         let build_dir = if build_dirs.len() == 1 {
@@ -190,9 +195,14 @@ pub fn run(
 
         let devices = xcrun::list_devices()?;
         let device_id = select_device(device, config, &devices)?;
+        let device_udid = devices
+            .iter()
+            .find(|d| d.identifier == device_id)
+            .map(|d| d.udid.as_str())
+            .unwrap_or(&device_id);
 
         println!("Building {}...", bold.apply_to(&scheme));
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_id)?;
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
         let build_dir = if build_dirs.len() == 1 {

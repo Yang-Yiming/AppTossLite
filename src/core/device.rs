@@ -5,6 +5,7 @@ use super::error::{Result, TossError};
 pub struct Device {
     pub name: String,
     pub identifier: String,
+    pub udid: String,
     pub model: String,
     pub os_version: String,
     pub state: DeviceState,

@@ -45,6 +45,8 @@ struct HardwareProperties {
     product_type: String,
     #[serde(default)]
     marketing_name: Option<String>,
+    #[serde(default)]
+    udid: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +92,7 @@ pub fn list_devices() -> Result<Vec<Device>> {
             Device {
                 name: d.device_properties.name,
                 identifier: d.identifier,
+                udid: d.hardware_properties.udid,
                 model,
                 os_version: d.device_properties.os_version_number,
                 state,
@@ -171,12 +174,12 @@ pub fn build_for_device(
     project_path: &Path,
     is_workspace: bool,
     scheme: &str,
-    device_id: &str,
+    device_udid: &str,
 ) -> Result<()> {
     use std::process::Stdio;
 
     let project_flag = if is_workspace { "-workspace" } else { "-project" };
-    let destination = format!("platform=iOS,id={}", device_id);
+    let destination = format!("platform=iOS,id={}", device_udid);
 
     let status = Command::new("xcodebuild")
         .args([
