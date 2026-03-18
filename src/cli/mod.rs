@@ -39,6 +39,9 @@ pub enum Commands {
         /// Device alias, UDID, or index
         #[arg(short, long)]
         device: Option<String>,
+        /// Use pre-built .app from build_dir instead of building from source
+        #[arg(long)]
+        prebuilt: bool,
     },
     /// Launch an app on a device
     Launch {
@@ -55,6 +58,9 @@ pub enum Commands {
         /// Device alias, UDID, or index
         #[arg(short, long)]
         device: Option<String>,
+        /// Use pre-built .app from build_dir instead of building from source
+        #[arg(long)]
+        prebuilt: bool,
     },
 }
 
@@ -135,14 +141,14 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 config::set_default_project(&mut config, &name)
             }
         },
-        Commands::Install { project, device } => {
-            actions::install(&config, project.as_deref(), device.as_deref())
+        Commands::Install { project, device, prebuilt } => {
+            actions::install(&config, project.as_deref(), device.as_deref(), prebuilt)
         }
         Commands::Launch { project, device } => {
             actions::launch(&config, project.as_deref(), device.as_deref())
         }
-        Commands::Run { project, device } => {
-            actions::run(&config, project.as_deref(), device.as_deref())
+        Commands::Run { project, device, prebuilt } => {
+            actions::run(&config, project.as_deref(), device.as_deref(), prebuilt)
         }
     }
 }

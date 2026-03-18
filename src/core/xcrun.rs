@@ -166,3 +166,31 @@ pub fn launch_app(device_id: &str, bundle_id: &str) -> Result<()> {
 
     Ok(())
 }
+
+pub fn build_for_device(
+    project_path: &Path,
+    is_workspace: bool,
+    scheme: &str,
+    device_id: &str,
+) -> Result<()> {
+    let project_flag = if is_workspace { "-workspace" } else { "-project" };
+    let destination = format!("platform=iOS,id={}", device_id);
+
+    let status = Command::new("xcodebuild")
+        .args([
+            project_flag,
+            &project_path.to_string_lossy(),
+            "-scheme",
+            scheme,
+            "-destination",
+            &destination,
+            "-allowProvisioningUpdates",
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err(TossError::Xcrun("xcodebuild failed".into()));
+    }
+
+    Ok(())
+}

@@ -1,10 +1,14 @@
 use console::Style;
 use dialoguer::Select;
+use std::path::PathBuf;
 
 use crate::core::config::Config;
 use crate::core::device::select_device;
 use crate::core::error::{Result, TossError};
-use crate::core::project::resolve_project;
+use crate::core::project::{
+    extract_bundle_id, find_app_in_dir, find_derived_data_build, find_xcode_project,
+    list_schemes, resolve_project, select_scheme,
+};
 use crate::core::xcrun;
 
 /// Resolve a project argument using the fallback chain:
@@ -56,9 +60,56 @@ fn resolve_project_arg(config: &Config, project: Option<&str>) -> Result<String>
     }
 }
 
-pub fn install(config: &Config, project: Option<&str>, device: Option<&str>) -> Result<()> {
+pub fn install(
+    config: &Config,
+    project: Option<&str>,
+    device: Option<&str>,
+    prebuilt: bool,
+) -> Result<()> {
     let project_name = resolve_project_arg(config, project)?;
-    let (app_path, _bundle_id) = resolve_project(config, &project_name)?;
+    let bold = Style::new().bold();
+
+    let (app_path, _bundle_id) = if prebuilt {
+        resolve_project(config, &project_name)?
+    } else {
+        // Build from source
+        let proj = config.projects.get(&project_name).unwrap();
+        let source_path = PathBuf::from(proj.path.as_ref().ok_or_else(|| {
+            TossError::Project(format!(
+                "project '{}' has no source path — re-register with path or use --prebuilt",
+                project_name
+            ))
+        })?);
+
+        let (project_path, is_workspace) = find_xcode_project(&source_path)?;
+        let schemes = list_schemes(&project_path, is_workspace)?;
+        let scheme = select_scheme(schemes)?;
+
+        let devices = xcrun::list_devices()?;
+        let device_id = select_device(device, config, &devices)?;
+
+        println!("Building {}...", bold.apply_to(&scheme));
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_id)?;
+
+        let build_dirs = find_derived_data_build(&source_path)?;
+        let build_dir = if build_dirs.len() == 1 {
+            &build_dirs[0]
+        } else {
+            let items: Vec<String> = build_dirs.iter().map(|p| p.display().to_string()).collect();
+            let selection = Select::new()
+                .with_prompt("Multiple build outputs found, select one")
+                .items(&items)
+                .default(0)
+                .interact()
+                .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+            &build_dirs[selection]
+        };
+
+        let app_name = find_app_in_dir(build_dir)?;
+        let app_path = build_dir.join(&app_name);
+        let bundle_id = extract_bundle_id(&app_path)?;
+        (app_path, bundle_id)
+    };
 
     let devices = xcrun::list_devices()?;
     let device_id = select_device(device, config, &devices)?;
@@ -69,7 +120,6 @@ pub fn install(config: &Config, project: Option<&str>, device: Option<&str>) -> 
         .map(|d| d.name.as_str())
         .unwrap_or(&device_id);
 
-    let bold = Style::new().bold();
     println!(
         "Installing {} → {}...",
         bold.apply_to(app_path.file_name().unwrap().to_string_lossy()),
@@ -110,20 +160,66 @@ pub fn launch(config: &Config, project: Option<&str>, device: Option<&str>) -> R
     Ok(())
 }
 
-pub fn run(config: &Config, project: Option<&str>, device: Option<&str>) -> Result<()> {
+pub fn run(
+    config: &Config,
+    project: Option<&str>,
+    device: Option<&str>,
+    prebuilt: bool,
+) -> Result<()> {
     let project_name = resolve_project_arg(config, project)?;
-    let (app_path, bundle_id) = resolve_project(config, &project_name)?;
+    let bold = Style::new().bold();
+
+    let (app_path, bundle_id, device_id) = if prebuilt {
+        let (app_path, bundle_id) = resolve_project(config, &project_name)?;
+        let devices = xcrun::list_devices()?;
+        let device_id = select_device(device, config, &devices)?;
+        (app_path, bundle_id, device_id)
+    } else {
+        // Build from source
+        let proj = config.projects.get(&project_name).unwrap();
+        let source_path = PathBuf::from(proj.path.as_ref().ok_or_else(|| {
+            TossError::Project(format!(
+                "project '{}' has no source path — re-register with path or use --prebuilt",
+                project_name
+            ))
+        })?);
+
+        let (project_path, is_workspace) = find_xcode_project(&source_path)?;
+        let schemes = list_schemes(&project_path, is_workspace)?;
+        let scheme = select_scheme(schemes)?;
+
+        let devices = xcrun::list_devices()?;
+        let device_id = select_device(device, config, &devices)?;
+
+        println!("Building {}...", bold.apply_to(&scheme));
+        xcrun::build_for_device(&project_path, is_workspace, &scheme, &device_id)?;
+
+        let build_dirs = find_derived_data_build(&source_path)?;
+        let build_dir = if build_dirs.len() == 1 {
+            &build_dirs[0]
+        } else {
+            let items: Vec<String> = build_dirs.iter().map(|p| p.display().to_string()).collect();
+            let selection = Select::new()
+                .with_prompt("Multiple build outputs found, select one")
+                .items(&items)
+                .default(0)
+                .interact()
+                .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+            &build_dirs[selection]
+        };
+
+        let app_name = find_app_in_dir(build_dir)?;
+        let app_path = build_dir.join(&app_name);
+        let bundle_id = extract_bundle_id(&app_path)?;
+        (app_path, bundle_id, device_id)
+    };
 
     let devices = xcrun::list_devices()?;
-    let device_id = select_device(device, config, &devices)?;
-
     let device_name = devices
         .iter()
         .find(|d| d.identifier == device_id)
         .map(|d| d.name.as_str())
         .unwrap_or(&device_id);
-
-    let bold = Style::new().bold();
 
     // Install
     println!(

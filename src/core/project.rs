@@ -145,3 +145,80 @@ pub fn find_app_in_dir(build_dir: &Path) -> Result<String> {
         ))),
     }
 }
+
+/// Find .xcworkspace or .xcodeproj in a directory.
+pub fn find_xcode_project(dir: &Path) -> Result<(PathBuf, bool)> {
+    // Prefer .xcworkspace
+    for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
+        if entry.path().extension().is_some_and(|ext| ext == "xcworkspace") {
+            return Ok((entry.path(), true));
+        }
+    }
+    // Fallback to .xcodeproj
+    for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
+        if entry.path().extension().is_some_and(|ext| ext == "xcodeproj") {
+            return Ok((entry.path(), false));
+        }
+    }
+    Err(TossError::Project(format!(
+        "no .xcworkspace or .xcodeproj found in {}",
+        dir.display()
+    )))
+}
+
+/// List schemes from an Xcode project.
+pub fn list_schemes(project_path: &Path, is_workspace: bool) -> Result<Vec<String>> {
+    let flag = if is_workspace { "-workspace" } else { "-project" };
+    let output = Command::new("xcodebuild")
+        .args(["-list", flag, &project_path.to_string_lossy()])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(TossError::Project(format!(
+            "xcodebuild -list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut schemes = Vec::new();
+    let mut in_schemes = false;
+
+    for line in stdout.lines() {
+        if line.trim() == "Schemes:" {
+            in_schemes = true;
+            continue;
+        }
+        if in_schemes {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            schemes.push(trimmed.to_string());
+        }
+    }
+
+    if schemes.is_empty() {
+        return Err(TossError::Project("no schemes found".into()));
+    }
+
+    Ok(schemes)
+}
+
+/// Select a scheme interactively or auto-select if only one.
+pub fn select_scheme(schemes: Vec<String>) -> Result<String> {
+    match schemes.len() {
+        0 => Err(TossError::Project("no schemes available".into())),
+        1 => Ok(schemes[0].clone()),
+        _ => {
+            use dialoguer::Select;
+            let selection = Select::new()
+                .with_prompt("Select scheme")
+                .items(&schemes)
+                .default(0)
+                .interact()
+                .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+            Ok(schemes[selection].clone())
+        }
+    }
+}
