@@ -2,7 +2,6 @@ pub mod actions;
 pub mod config;
 pub mod devices;
 pub mod projects;
-pub mod sign;
 
 use clap::{Parser, Subcommand};
 
@@ -198,7 +197,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             launch,
             identity,
             profile,
-        } => sign::sign(
+        } => actions::sign(
             &config,
             &ipa,
             device.as_deref(),
