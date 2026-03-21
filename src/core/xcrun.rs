@@ -180,7 +180,11 @@ pub fn build_for_device(
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let project_flag = if is_workspace { "-workspace" } else { "-project" };
+    let project_flag = if is_workspace {
+        "-workspace"
+    } else {
+        "-project"
+    };
     let destination = format!("platform=iOS,id={}", device_udid);
 
     let mut child = Command::new("xcodebuild")
@@ -194,8 +198,16 @@ pub fn build_for_device(
             "-allowProvisioningUpdates",
             "-allowProvisioningDeviceRegistration",
         ])
-        .stdout(if verbose { Stdio::inherit() } else { Stdio::piped() })
-        .stderr(if verbose { Stdio::inherit() } else { Stdio::piped() })
+        .stdout(if verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
+        .stderr(if verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
         .spawn()?;
 
     if !verbose {

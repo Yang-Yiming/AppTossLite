@@ -1,9 +1,10 @@
 use console::Style;
-use dialoguer::Select;
+use dialoguer::{Input, Select};
 
 use crate::core::actions::{install_app_workflow, launch_app_workflow, run_app_workflow};
 use crate::core::config::Config;
 use crate::core::error::{Result, TossError};
+use crate::core::sign;
 use crate::core::xcrun;
 
 fn select_project(config: &Config) -> Result<String> {
@@ -84,7 +85,14 @@ pub fn install(config: &Config) -> Result<()> {
 
     let proj = config.projects.get(&project_name).unwrap();
     let prebuilt = proj.path.is_none();
-    install_app_workflow(config, &project_name, &device_id, &device_udid, prebuilt, false)?;
+    install_app_workflow(
+        config,
+        &project_name,
+        &device_id,
+        &device_udid,
+        prebuilt,
+        false,
+    )?;
 
     let green = Style::new().green().bold();
     println!("{}", green.apply_to("Installed successfully."));
@@ -122,7 +130,14 @@ pub fn run(config: &Config) -> Result<()> {
 
     let proj = config.projects.get(&project_name).unwrap();
     let prebuilt = proj.path.is_none();
-    let (_app_path, bundle_id) = run_app_workflow(config, &project_name, &device_id, &device_udid, prebuilt, false)?;
+    let (_app_path, bundle_id) = run_app_workflow(
+        config,
+        &project_name,
+        &device_id,
+        &device_udid,
+        prebuilt,
+        false,
+    )?;
 
     let green = Style::new().green();
     println!("{}", green.apply_to("Installed."));
@@ -131,5 +146,50 @@ pub fn run(config: &Config) -> Result<()> {
 
     let green_bold = Style::new().green().bold();
     println!("{}", green_bold.apply_to("Running!"));
+    Ok(())
+}
+
+pub fn sign(config: &Config) -> Result<()> {
+    let ipa_path: String = Input::new()
+        .with_prompt("IPA file path")
+        .interact_text()
+        .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+
+    let ipa_path = ipa_path.trim();
+    let path = std::path::Path::new(ipa_path);
+    if !path.exists() {
+        return Err(TossError::Signing(format!("IPA not found: {}", ipa_path)));
+    }
+
+    let (device_id, _device_udid, device_name) = select_device(config)?;
+
+    let launch_items = &["Install only", "Install + Launch"];
+    let launch_sel = Select::new()
+        .with_prompt("After signing")
+        .items(launch_items)
+        .default(0)
+        .interact()
+        .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+    let launch = launch_sel == 1;
+
+    let bold = Style::new().bold();
+    let ipa_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| ipa_path.to_string());
+    println!(
+        "Signing {} → {}...",
+        bold.apply_to(&ipa_name),
+        bold.apply_to(&device_name),
+    );
+
+    sign::sign_workflow(path, &device_id, None, None, launch)?;
+
+    let green = Style::new().green().bold();
+    if launch {
+        println!("{}", green.apply_to("Running!"));
+    } else {
+        println!("{}", green.apply_to("Installed successfully."));
+    }
     Ok(())
 }

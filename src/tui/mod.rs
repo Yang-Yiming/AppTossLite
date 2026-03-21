@@ -18,6 +18,7 @@ pub fn run() -> Result<()> {
             "Run app (install + launch)",
             "Install app",
             "Launch app",
+            "Sign IPA (resign + deploy)",
             "Devices",
             "Projects",
             "Quit",
@@ -36,9 +37,10 @@ pub fn run() -> Result<()> {
             0 => actions::run(&config),
             1 => actions::install(&config),
             2 => actions::launch(&config),
-            3 => devices::menu(&mut config),
-            4 => projects::menu(&mut config),
-            5 => return Ok(()),
+            3 => actions::sign(&config),
+            4 => devices::menu(&mut config),
+            5 => projects::menu(&mut config),
+            6 => return Ok(()),
             _ => unreachable!(),
         };
 

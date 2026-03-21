@@ -84,7 +84,14 @@ pub fn install(
         bold.apply_to(device_name),
     );
 
-    let _app_path = install_app_workflow(config, &project_name, &device_id, device_udid, prebuilt, verbose)?;
+    let _app_path = install_app_workflow(
+        config,
+        &project_name,
+        &device_id,
+        device_udid,
+        prebuilt,
+        verbose,
+    )?;
 
     let green = Style::new().green().bold();
     println!("{}", green.apply_to("Installed successfully."));
@@ -143,7 +150,14 @@ pub fn run(
         bold.apply_to(device_name),
     );
 
-    let (_app_path, bundle_id) = run_app_workflow(config, &project_name, &device_id, device_udid, prebuilt, verbose)?;
+    let (_app_path, bundle_id) = run_app_workflow(
+        config,
+        &project_name,
+        &device_id,
+        device_udid,
+        prebuilt,
+        verbose,
+    )?;
 
     let green = Style::new().green();
     println!("{}", green.apply_to("Installed."));

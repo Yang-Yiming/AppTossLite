@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::core::config::Config;
 use crate::core::error::{Result, TossError};
 use crate::core::project::{
-    extract_bundle_id, find_app_in_dir, find_derived_data_build, find_xcode_project,
-    list_schemes, resolve_project, select_scheme,
+    extract_bundle_id, find_app_in_dir, find_derived_data_build, find_xcode_project, list_schemes,
+    resolve_project, select_scheme,
 };
 use crate::core::xcrun;
 
@@ -57,11 +57,7 @@ pub fn install_app_workflow(
     Ok(app_path)
 }
 
-pub fn launch_app_workflow(
-    config: &Config,
-    project_name: &str,
-    device_id: &str,
-) -> Result<String> {
+pub fn launch_app_workflow(config: &Config, project_name: &str, device_id: &str) -> Result<String> {
     let (_app_path, bundle_id) = resolve_project(config, project_name)?;
     xcrun::launch_app(device_id, &bundle_id)?;
     Ok(bundle_id)

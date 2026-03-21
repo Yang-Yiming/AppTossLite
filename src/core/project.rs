@@ -150,13 +150,21 @@ pub fn find_app_in_dir(build_dir: &Path) -> Result<String> {
 pub fn find_xcode_project(dir: &Path) -> Result<(PathBuf, bool)> {
     // Prefer .xcworkspace
     for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
-        if entry.path().extension().is_some_and(|ext| ext == "xcworkspace") {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "xcworkspace")
+        {
             return Ok((entry.path(), true));
         }
     }
     // Fallback to .xcodeproj
     for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
-        if entry.path().extension().is_some_and(|ext| ext == "xcodeproj") {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "xcodeproj")
+        {
             return Ok((entry.path(), false));
         }
     }
@@ -168,7 +176,11 @@ pub fn find_xcode_project(dir: &Path) -> Result<(PathBuf, bool)> {
 
 /// List schemes from an Xcode project.
 pub fn list_schemes(project_path: &Path, is_workspace: bool) -> Result<Vec<String>> {
-    let flag = if is_workspace { "-workspace" } else { "-project" };
+    let flag = if is_workspace {
+        "-workspace"
+    } else {
+        "-project"
+    };
     let output = Command::new("xcodebuild")
         .args(["-list", flag, &project_path.to_string_lossy()])
         .output()?;

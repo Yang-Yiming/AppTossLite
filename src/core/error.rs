@@ -12,6 +12,9 @@ pub enum TossError {
     #[error("xcrun failed: {0}")]
     Xcrun(String),
 
+    #[error("signing error: {0}")]
+    Signing(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

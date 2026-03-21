@@ -2,6 +2,7 @@ pub mod actions;
 pub mod config;
 pub mod devices;
 pub mod projects;
+pub mod sign;
 
 use clap::{Parser, Subcommand};
 
@@ -67,6 +68,23 @@ pub enum Commands {
         /// Show full xcodebuild output
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// Resign an IPA and deploy to device
+    Sign {
+        /// Path to .ipa file
+        ipa: String,
+        /// Device alias, UDID, or index
+        #[arg(short, long)]
+        device: Option<String>,
+        /// Launch after installing
+        #[arg(short, long)]
+        launch: bool,
+        /// Signing identity (name substring or hash prefix)
+        #[arg(long)]
+        identity: Option<String>,
+        /// Path to .mobileprovision file
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
@@ -147,14 +165,46 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 config::set_default_project(&mut config, &name)
             }
         },
-        Commands::Install { project, device, prebuilt, verbose } => {
-            actions::install(&config, project.as_deref(), device.as_deref(), prebuilt, verbose)
-        }
+        Commands::Install {
+            project,
+            device,
+            prebuilt,
+            verbose,
+        } => actions::install(
+            &config,
+            project.as_deref(),
+            device.as_deref(),
+            prebuilt,
+            verbose,
+        ),
         Commands::Launch { project, device } => {
             actions::launch(&config, project.as_deref(), device.as_deref())
         }
-        Commands::Run { project, device, prebuilt, verbose } => {
-            actions::run(&config, project.as_deref(), device.as_deref(), prebuilt, verbose)
-        }
+        Commands::Run {
+            project,
+            device,
+            prebuilt,
+            verbose,
+        } => actions::run(
+            &config,
+            project.as_deref(),
+            device.as_deref(),
+            prebuilt,
+            verbose,
+        ),
+        Commands::Sign {
+            ipa,
+            device,
+            launch,
+            identity,
+            profile,
+        } => sign::sign(
+            &config,
+            &ipa,
+            device.as_deref(),
+            identity.as_deref(),
+            profile.as_deref(),
+            launch,
+        ),
     }
 }
