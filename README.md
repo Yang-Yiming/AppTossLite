@@ -82,6 +82,9 @@ toss config set-default-project myapp
 # Set prefix for temporary signing bundle IDs
 toss config set-temp-bundle-prefix cn.yangym.tmp
 
+# Set the Apple developer team ID used for temporary signing
+toss config set-team-id FRR2796948
+
 # Show all local toss state and signing cache
 toss state
 
@@ -113,6 +116,7 @@ project = "myapp"
 
 [signing]
 temp_bundle_prefix = "com.myapp.tmp"
+team_id = "FRR2796948"
 
 [devices.aliases]
 phone = "00008110-001234567890001E"

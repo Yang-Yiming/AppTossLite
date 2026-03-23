@@ -69,3 +69,22 @@ pub fn set_temp_bundle_prefix(config: &mut Config, prefix: &str) -> Result<()> {
     println!("Temp bundle prefix set to '{}'", trimmed);
     Ok(())
 }
+
+pub fn set_team_id(config: &mut Config, team_id: &str) -> Result<()> {
+    let trimmed = team_id.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        return Err(TossError::Config("team id cannot be empty".into()));
+    }
+
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(TossError::Config(format!(
+            "invalid team id '{}' — use ASCII letters and numbers only",
+            team_id
+        )));
+    }
+
+    config.signing.team_id = Some(trimmed.to_string());
+    config.save()?;
+    println!("Team ID set to '{}'", trimmed);
+    Ok(())
+}

@@ -9,7 +9,7 @@ pub fn show(config: &Config) -> Result<()> {
     let config_path = Config::path()?;
     println!("Local state");
     println!("  config file: {}", config_path.display());
-    println!("  stored here: defaults, device aliases, projects, temp_bundle_prefix");
+    println!("  stored here: defaults, device aliases, projects, temp_bundle_prefix, team_id");
     println!(
         "  temp_bundle_prefix: {}",
         config
@@ -17,6 +17,10 @@ pub fn show(config: &Config) -> Result<()> {
             .temp_bundle_prefix
             .as_deref()
             .unwrap_or("<unset>")
+    );
+    println!(
+        "  team_id: {}",
+        config.signing.team_id.as_deref().unwrap_or("<unset>")
     );
     println!(
         "  default_device: {}",

@@ -560,13 +560,6 @@ fn cleanup_profiles(paths: &[PathBuf]) -> Result<()> {
 // Auto-provisioning
 // ---------------------------------------------------------------------------
 
-fn extract_team_id(identity: &SigningIdentity) -> Option<String> {
-    // Identity name looks like "Apple Development: Name (TEAMID)"
-    let start = identity.name.rfind('(')?;
-    let end = identity.name.rfind(')')?;
-    (start < end).then(|| identity.name[start + 1..end].to_string())
-}
-
 fn normalize_bundle_component(input: &str) -> String {
     let mut out = String::new();
     let mut prev_was_sep = false;
@@ -619,6 +612,21 @@ fn temp_bundle_id_prefix(config: &Config) -> Result<&str> {
     }
 
     Ok(prefix)
+}
+
+fn temp_team_id(config: &Config) -> Result<&str> {
+    let team_id = config.signing.team_id.as_deref().ok_or_else(|| {
+        TossError::Signing("temporary signing requires `toss config set-team-id <TEAMID>`".into())
+    })?;
+
+    if !team_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(TossError::Signing(format!(
+            "invalid configured team id '{}' — update it with `toss config set-team-id <TEAMID>`",
+            team_id
+        )));
+    }
+
+    Ok(team_id)
 }
 
 fn display_app_name(app_path: &Path, original_bundle_id: &str) -> String {
@@ -854,16 +862,12 @@ fn create_minimal_xcode_project(dir: &Path, bundle_id: &str, team_id: &str) -> R
     Ok(())
 }
 
-fn auto_provision(bundle_id: &str, identity: &SigningIdentity, device_udid: &str) -> Result<()> {
-    let team_id = extract_team_id(identity).ok_or_else(|| {
-        TossError::Signing("cannot parse team ID from signing identity name".into())
-    })?;
-
+fn auto_provision(bundle_id: &str, team_id: &str) -> Result<()> {
     let temp = TempDir::new()?;
     create_minimal_xcode_project(temp.path(), bundle_id, &team_id)?;
 
     let project_path = temp.path().join("App.xcodeproj");
-    xcrun::build_for_device(&project_path, false, "App", device_udid, false).map_err(|err| {
+    xcrun::build_for_generic_ios(&project_path, false, "App", false).map_err(|err| {
         TossError::Signing(format!(
             "auto-provisioning failed for bundle ID '{}': {}",
             bundle_id, err
@@ -876,8 +880,6 @@ fn auto_provision(bundle_id: &str, identity: &SigningIdentity, device_udid: &str
 fn resolve_signing_plan(
     config: &Config,
     extracted: &ExtractedApp,
-    identity: &SigningIdentity,
-    device_udid: &str,
     profile_override: Option<&str>,
 ) -> Result<SigningPlan> {
     if let Some(path) = profile_override {
@@ -922,7 +924,8 @@ fn resolve_signing_plan(
         temp_bundle_id
     );
     let before_paths = list_profile_paths(&profiles_before);
-    auto_provision(&temp_bundle_id, identity, device_udid)?;
+    let team_id = temp_team_id(config)?;
+    auto_provision(&temp_bundle_id, team_id)?;
 
     let profiles_after = find_provisioning_profiles()?;
     let profile = match_profile(&profiles_after, &temp_bundle_id)?;
@@ -944,7 +947,6 @@ pub fn sign_workflow(
     config: &Config,
     ipa_path: &Path,
     device_id: &str,
-    device_udid: &str,
     identity_override: Option<&str>,
     profile_override: Option<&str>,
     launch: bool,
@@ -962,8 +964,7 @@ pub fn sign_workflow(
     let identity = select_signing_identity(&identities, identity_override)?;
     println!("Identity: {}", identity.name);
 
-    let signing_plan =
-        resolve_signing_plan(config, &extracted, &identity, device_udid, profile_override)?;
+    let signing_plan = resolve_signing_plan(config, &extracted, profile_override)?;
     println!("Profile: {}", signing_plan.profile.name);
 
     let result = (|| {
@@ -1021,6 +1022,7 @@ mod tests {
         let config = Config {
             signing: SigningConfig {
                 temp_bundle_prefix: Some("cn.yangym.tmp".into()),
+                team_id: Some("FRR2796948".into()),
             },
             ..Config::default()
         };

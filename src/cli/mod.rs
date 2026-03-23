@@ -147,6 +147,12 @@ pub enum ConfigAction {
         /// Prefix like cn.yangym.tmp
         prefix: String,
     },
+    /// Set the Apple developer team ID used for temporary signing
+    #[command(name = "set-team-id")]
+    SetTeamId {
+        /// Team ID like FRR2796948
+        team_id: String,
+    },
 }
 
 pub fn dispatch(command: Commands) -> Result<()> {
@@ -178,6 +184,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             ConfigAction::SetTempBundlePrefix { prefix } => {
                 config::set_temp_bundle_prefix(&mut config, &prefix)
             }
+            ConfigAction::SetTeamId { team_id } => config::set_team_id(&mut config, &team_id),
         },
         Commands::State => state::show(&config),
         Commands::Cleanup => cleanup::run(&config),
