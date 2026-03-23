@@ -90,6 +90,9 @@ toss state
 
 # Remove temporary signing cache created by toss
 toss cleanup
+
+# Run environment diagnostics
+toss doctor
 ```
 
 ### Interactive Mode
