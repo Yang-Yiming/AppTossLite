@@ -1,18 +1,17 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dialoguer::Select;
-use tempfile::TempDir;
+use serde_json::{Map, Value};
+use tempfile::{NamedTempFile, TempDir};
 
 use super::config::Config;
 use super::error::{Result, TossError};
 use super::project::extract_bundle_id;
 use super::xcrun;
-
-// ---------------------------------------------------------------------------
-// Data structures
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct SigningIdentity {
@@ -23,9 +22,13 @@ pub struct SigningIdentity {
 #[derive(Debug, Clone)]
 pub struct ProvisioningProfile {
     pub path: PathBuf,
+    pub uuid: Option<String>,
     pub name: String,
     pub team_ids: Vec<String>,
     pub bundle_id_pattern: String,
+    pub expiration_epoch: Option<u64>,
+    pub provisioned_devices: Vec<String>,
+    pub provisions_all_devices: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,18 +41,36 @@ pub struct ProvisioningProfileInspection {
 pub struct ExtractedApp {
     pub _temp_dir: TempDir,
     pub app_path: PathBuf,
-    pub bundle_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BundleKind {
+    App,
+    AppExtension,
+}
+
+impl BundleKind {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::AppExtension => "app extension",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BundleTarget {
+    path: PathBuf,
+    kind: BundleKind,
+    original_bundle_id: String,
+    final_bundle_id: String,
+    profile: ProvisioningProfile,
 }
 
 struct SigningPlan {
-    profile: ProvisioningProfile,
-    final_bundle_id: String,
+    targets: Vec<BundleTarget>,
     cleanup_profiles: Vec<PathBuf>,
 }
-
-// ---------------------------------------------------------------------------
-// IPA extraction
-// ---------------------------------------------------------------------------
 
 pub fn unzip_ipa(ipa_path: &Path) -> Result<ExtractedApp> {
     if !ipa_path.exists() {
@@ -75,7 +96,6 @@ pub fn unzip_ipa(ipa_path: &Path) -> Result<ExtractedApp> {
         )));
     }
 
-    // Find Payload/*.app
     let payload_dir = temp_dir.path().join("Payload");
     if !payload_dir.is_dir() {
         return Err(TossError::Signing("IPA has no Payload/ directory".into()));
@@ -87,32 +107,10 @@ pub fn unzip_ipa(ipa_path: &Path) -> Result<ExtractedApp> {
         .map(|e| e.path())
         .ok_or_else(|| TossError::Signing("no .app found in Payload/".into()))?;
 
-    let bundle_id = extract_bundle_id(&app_path)?;
-
     Ok(ExtractedApp {
         _temp_dir: temp_dir,
         app_path,
-        bundle_id,
     })
-}
-
-fn ensure_no_app_extensions(app_path: &Path) -> Result<()> {
-    let plugins_dir = app_path.join("PlugIns");
-    if !plugins_dir.is_dir() {
-        return Ok(());
-    }
-
-    let has_appex = fs::read_dir(&plugins_dir)?
-        .filter_map(|e| e.ok())
-        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "appex"));
-
-    if has_appex {
-        return Err(TossError::Signing(
-            "temporary bundle ID signing does not support apps with .appex extensions yet".into(),
-        ));
-    }
-
-    Ok(())
 }
 
 fn plist_set_string(plist: &Path, key: &str, value: &str) -> Result<()> {
@@ -133,14 +131,10 @@ fn plist_set_string(plist: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn rewrite_bundle_id(app_path: &Path, bundle_id: &str) -> Result<()> {
-    let info_plist = app_path.join("Info.plist");
+fn rewrite_bundle_id(bundle_path: &Path, bundle_id: &str) -> Result<()> {
+    let info_plist = bundle_path.join("Info.plist");
     plist_set_string(&info_plist, "CFBundleIdentifier", bundle_id)
 }
-
-// ---------------------------------------------------------------------------
-// Signing identity discovery
-// ---------------------------------------------------------------------------
 
 pub fn list_signing_identities() -> Result<Vec<SigningIdentity>> {
     let output = Command::new("security")
@@ -159,15 +153,11 @@ pub fn list_signing_identities() -> Result<Vec<SigningIdentity>> {
 
     for line in stdout.lines() {
         let trimmed = line.trim();
-        // Lines look like:
-        //   1) ABCDEF1234567890... "Apple Development: Name (TEAMID)"
         if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
             let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit() || c == ')');
             let rest = rest.trim();
-            // Extract hex hash (40 chars)
             if rest.len() >= 40 && rest[..40].chars().all(|c| c.is_ascii_hexdigit()) {
                 let hash = rest[..40].to_string();
-                // Extract quoted name
                 if let (Some(start), Some(end)) = (rest.find('"'), rest.rfind('"'))
                     && start < end
                 {
@@ -192,7 +182,6 @@ pub fn select_signing_identity(
     override_name: Option<&str>,
 ) -> Result<SigningIdentity> {
     if let Some(query) = override_name {
-        // Substring match
         let matches: Vec<_> = identities
             .iter()
             .filter(|id| id.name.contains(query) || id.hash.starts_with(query))
@@ -231,13 +220,8 @@ pub fn select_signing_identity(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Provisioning profile discovery
-// ---------------------------------------------------------------------------
-
 pub fn find_provisioning_profiles() -> Result<Vec<ProvisioningProfile>> {
     let profiles_dir = provisioning_profiles_dir()?;
-
     let mut profiles = Vec::new();
 
     for entry in fs::read_dir(&profiles_dir)?.filter_map(|e| e.ok()) {
@@ -321,37 +305,19 @@ fn plutil_extract(plist: &Path, key: &str) -> Option<String> {
 }
 
 fn parse_provisioning_profile(path: &Path) -> Result<ProvisioningProfile> {
-    // Decode the CMS envelope
-    let cms_output = Command::new("security")
-        .args(["cms", "-D", "-i"])
-        .arg(path)
-        .output()?;
-
-    if !cms_output.status.success() {
-        return Err(TossError::Signing(format!(
-            "security cms failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&cms_output.stderr)
-        )));
-    }
-
-    // Write decoded plist to temp file, then extract fields individually.
-    // (plutil -convert json fails on profiles because they contain <data> blobs)
-    let tmp = tempfile::NamedTempFile::new()?;
-    fs::write(tmp.path(), &cms_output.stdout)?;
+    let tmp = decode_provisioning_profile(path)?;
 
     let name = plutil_extract(tmp.path(), "Name").unwrap_or_else(|| "Unknown".into());
+    let uuid = plutil_extract(tmp.path(), "UUID");
 
-    // Collect TeamIdentifier array
     let mut team_ids = Vec::new();
-    for i in 0..8 {
+    for i in 0..32 {
         match plutil_extract(tmp.path(), &format!("TeamIdentifier.{}", i)) {
             Some(id) => team_ids.push(id),
             None => break,
         }
     }
 
-    // application-identifier looks like "TEAMID.com.example.app" or "TEAMID.*"
     let app_id =
         plutil_extract(tmp.path(), "Entitlements.application-identifier").unwrap_or_default();
     let bundle_id_pattern = app_id
@@ -359,62 +325,187 @@ fn parse_provisioning_profile(path: &Path) -> Result<ProvisioningProfile> {
         .map(|i| app_id[i + 1..].to_string())
         .unwrap_or(app_id);
 
+    let expiration_epoch = plutil_extract(tmp.path(), "ExpirationDate")
+        .and_then(|value| parse_profile_date_to_epoch(&value));
+
+    let mut provisioned_devices = Vec::new();
+    for i in 0..512 {
+        match plutil_extract(tmp.path(), &format!("ProvisionedDevices.{}", i)) {
+            Some(device) => provisioned_devices.push(device),
+            None => break,
+        }
+    }
+
+    let provisions_all_devices = plutil_extract(tmp.path(), "ProvisionsAllDevices")
+        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        .unwrap_or(false);
+
     Ok(ProvisioningProfile {
         path: path.to_path_buf(),
+        uuid,
         name,
         team_ids,
         bundle_id_pattern,
+        expiration_epoch,
+        provisioned_devices,
+        provisions_all_devices,
     })
 }
 
-pub fn match_profile(
+fn decode_provisioning_profile(path: &Path) -> Result<NamedTempFile> {
+    let cms_output = Command::new("security")
+        .args(["cms", "-D", "-i"])
+        .arg(path)
+        .output()?;
+
+    let tmp = NamedTempFile::new()?;
+    if cms_output.status.success() {
+        fs::write(tmp.path(), &cms_output.stdout)?;
+        return Ok(tmp);
+    }
+
+    let raw = fs::read(path)?;
+    if let Some(plist) = extract_embedded_plist_bytes(&raw) {
+        fs::write(tmp.path(), plist)?;
+        return Ok(tmp);
+    }
+
+    return Err(TossError::Signing(format!(
+        "failed to decode provisioning profile {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&cms_output.stderr).trim()
+    )));
+}
+
+fn extract_embedded_plist_bytes(raw: &[u8]) -> Option<&[u8]> {
+    let start = find_bytes(raw, b"<?xml").or_else(|| find_bytes(raw, b"<plist"))?;
+    let end_start = find_bytes(&raw[start..], b"</plist>")?;
+    let end = start + end_start + b"</plist>".len();
+    Some(&raw[start..end])
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn identity_matches_profile(_identity: &SigningIdentity, _profile: &ProvisioningProfile) -> bool {
+    true
+}
+
+fn parse_profile_date_to_epoch(raw: &str) -> Option<u64> {
+    for format in ["%Y-%m-%d %H:%M:%S %z", "%Y-%m-%dT%H:%M:%SZ"] {
+        let output = Command::new("date")
+            .args(["-j", "-u", "-f", format, raw, "+%s"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Ok(epoch) = value.parse::<u64>() {
+                return Some(epoch);
+            }
+        }
+    }
+    None
+}
+
+fn profile_matches_bundle_id(profile: &ProvisioningProfile, bundle_id: &str) -> bool {
+    if profile.bundle_id_pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = profile.bundle_id_pattern.strip_suffix('*') {
+        return bundle_id.starts_with(prefix);
+    }
+    profile.bundle_id_pattern == bundle_id
+}
+
+fn profile_compatibility_issues(
+    profile: &ProvisioningProfile,
+    _identity: &SigningIdentity,
+    bundle_id: &str,
+    device_udid: &str,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    if !profile_matches_bundle_id(profile, bundle_id) {
+        issues.push(format!(
+            "bundle id '{}' does not match profile pattern '{}'",
+            bundle_id, profile.bundle_id_pattern
+        ));
+    }
+
+    if let Some(expiration_epoch) = profile.expiration_epoch {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        if expiration_epoch <= now {
+            issues.push("profile is expired".into());
+        }
+    }
+
+    if !profile.provisions_all_devices
+        && !profile.provisioned_devices.is_empty()
+        && !profile
+            .provisioned_devices
+            .iter()
+            .any(|udid| udid == device_udid)
+    {
+        issues.push(format!("profile does not include device {}", device_udid));
+    }
+
+    issues
+}
+
+fn match_compatible_profile(
     profiles: &[ProvisioningProfile],
     bundle_id: &str,
-) -> Result<ProvisioningProfile> {
-    // First pass: exact bundle ID match
+    identity: &SigningIdentity,
+    device_udid: &str,
+) -> Result<Option<ProvisioningProfile>> {
     let exact: Vec<_> = profiles
         .iter()
         .filter(|p| p.bundle_id_pattern == bundle_id)
+        .filter(|p| profile_compatibility_issues(p, identity, bundle_id, device_udid).is_empty())
+        .filter(|p| identity_matches_profile(identity, p))
         .collect();
 
     if exact.len() == 1 {
-        return Ok(exact[0].clone());
+        return Ok(Some(exact[0].clone()));
     }
 
-    // Second pass: wildcard match (e.g., "com.team.*" matches "com.team.app")
     let wildcard: Vec<_> = profiles
         .iter()
-        .filter(|p| {
-            if p.bundle_id_pattern == "*" {
-                return true;
-            }
-            if let Some(prefix) = p.bundle_id_pattern.strip_suffix("*") {
-                return bundle_id.starts_with(prefix);
-            }
-            p.bundle_id_pattern == bundle_id
-        })
+        .filter(|p| profile_matches_bundle_id(p, bundle_id))
+        .filter(|p| profile_compatibility_issues(p, identity, bundle_id, device_udid).is_empty())
+        .filter(|p| identity_matches_profile(identity, p))
         .collect();
 
     let candidates = if !exact.is_empty() { &exact } else { &wildcard };
 
     match candidates.len() {
-        0 => Err(TossError::Signing(format!(
-            "no provisioning profile matches bundle ID '{}'",
-            bundle_id
-        ))),
-        1 => Ok(candidates[0].clone()),
+        0 => Ok(None),
+        1 => Ok(Some(candidates[0].clone())),
         _ => {
             let items: Vec<String> = candidates
                 .iter()
-                .map(|p| format!("{} ({})", p.name, p.bundle_id_pattern))
+                .map(|p| {
+                    let uuid = p.uuid.as_deref().unwrap_or("no-uuid");
+                    format!("{} ({}, {})", p.name, p.bundle_id_pattern, uuid)
+                })
                 .collect();
             let selection = Select::new()
-                .with_prompt("Multiple profiles match, select one")
+                .with_prompt("Multiple compatible profiles match, select one")
                 .items(&items)
                 .default(0)
                 .interact()
                 .map_err(|e| TossError::UserCancelled(e.to_string()))?;
-            Ok(candidates[selection].clone())
+            Ok(Some(candidates[selection].clone()))
         }
     }
 }
@@ -428,137 +519,6 @@ fn load_profile_from_path(path: &Path) -> Result<ProvisioningProfile> {
     }
     parse_provisioning_profile(path)
 }
-
-fn list_profile_paths(profiles: &[ProvisioningProfile]) -> Vec<PathBuf> {
-    profiles.iter().map(|p| p.path.clone()).collect()
-}
-
-// ---------------------------------------------------------------------------
-// Entitlements extraction
-// ---------------------------------------------------------------------------
-
-fn extract_entitlements(profile_path: &Path, temp_dir: &Path) -> Result<PathBuf> {
-    // Decode CMS
-    let cms_output = Command::new("security")
-        .args(["cms", "-D", "-i"])
-        .arg(profile_path)
-        .output()?;
-
-    if !cms_output.status.success() {
-        return Err(TossError::Signing(format!(
-            "security cms failed: {}",
-            String::from_utf8_lossy(&cms_output.stderr)
-        )));
-    }
-
-    // Write decoded plist to temp file
-    let decoded_plist = temp_dir.join("profile_decoded.plist");
-    fs::write(&decoded_plist, &cms_output.stdout)?;
-
-    // Extract Entitlements dict as xml1 plist
-    let ent_path = temp_dir.join("entitlements.plist");
-    let output = Command::new("plutil")
-        .args([
-            "-extract",
-            "Entitlements",
-            "xml1",
-            "-o",
-            &ent_path.to_string_lossy(),
-            &decoded_plist.to_string_lossy(),
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(TossError::Signing(format!(
-            "failed to extract entitlements: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(ent_path)
-}
-
-// ---------------------------------------------------------------------------
-// Code signing
-// ---------------------------------------------------------------------------
-
-fn resign_app(app_path: &Path, identity: &SigningIdentity, entitlements: &Path) -> Result<()> {
-    // Sign nested code first (frameworks, dylibs, plugins)
-    sign_nested(app_path, identity, "Frameworks")?;
-    sign_nested(app_path, identity, "PlugIns")?;
-
-    // Sign the main app bundle with entitlements
-    let output = Command::new("codesign")
-        .args([
-            "--force",
-            "--sign",
-            &identity.hash,
-            "--entitlements",
-            &entitlements.to_string_lossy(),
-            &app_path.to_string_lossy(),
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(TossError::Signing(format!(
-            "codesign failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(())
-}
-
-fn sign_nested(app_path: &Path, identity: &SigningIdentity, subdir: &str) -> Result<()> {
-    let dir = app_path.join(subdir);
-    if !dir.is_dir() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let should_sign = ext == "framework" || ext == "dylib" || ext == "appex";
-
-        if should_sign {
-            // Recursively sign nested content inside frameworks
-            if ext == "framework" || ext == "appex" {
-                sign_nested(&path, identity, "Frameworks")?;
-            }
-
-            let output = Command::new("codesign")
-                .args(["--force", "--sign", &identity.hash, &path.to_string_lossy()])
-                .output()?;
-
-            if !output.status.success() {
-                return Err(TossError::Signing(format!(
-                    "codesign failed for {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr)
-                )));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn cleanup_profiles(paths: &[PathBuf]) -> Result<()> {
-    for path in paths {
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Auto-provisioning
-// ---------------------------------------------------------------------------
 
 fn normalize_bundle_component(input: &str) -> String {
     let mut out = String::new();
@@ -629,8 +589,8 @@ fn temp_team_id(config: &Config) -> Result<&str> {
     Ok(team_id)
 }
 
-fn display_app_name(app_path: &Path, original_bundle_id: &str) -> String {
-    let from_path = app_path
+fn display_app_name(bundle_path: &Path, original_bundle_id: &str) -> String {
+    let from_path = bundle_path
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
@@ -649,11 +609,11 @@ fn display_app_name(app_path: &Path, original_bundle_id: &str) -> String {
 
 fn generate_temp_bundle_id(
     config: &Config,
-    app_path: &Path,
+    bundle_path: &Path,
     original_bundle_id: &str,
 ) -> Result<String> {
     let prefix = temp_bundle_id_prefix(config)?;
-    let app_name = display_app_name(app_path, original_bundle_id);
+    let app_name = display_app_name(bundle_path, original_bundle_id);
     let suffix = stable_hex_suffix(original_bundle_id);
     Ok(format!(
         "{}.{}.{}",
@@ -661,6 +621,22 @@ fn generate_temp_bundle_id(
         app_name,
         suffix
     ))
+}
+
+fn derive_extension_bundle_id(
+    main_original_bundle_id: &str,
+    main_final_bundle_id: &str,
+    extension_original_bundle_id: &str,
+    extension_path: &Path,
+    config: &Config,
+) -> Result<String> {
+    if let Some(suffix) = extension_original_bundle_id.strip_prefix(main_original_bundle_id)
+        && suffix.starts_with('.')
+    {
+        return Ok(format!("{}{}", main_final_bundle_id, suffix));
+    }
+
+    generate_temp_bundle_id(config, extension_path, extension_original_bundle_id)
 }
 
 fn profiles_created_for_bundle_id(
@@ -685,11 +661,12 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002 /* main.swift */; };
+		AA000001 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002 /* App.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		AA000002 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		AA000002 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		AA000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA000003 /* App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -707,7 +684,8 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 		AA000005 = {
 			isa = PBXGroup;
 			children = (
-				AA000002 /* main.swift */,
+				AA000002 /* App.swift */,
+				AA000016 /* Info.plist */,
 				AA000006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -745,7 +723,14 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 		AA000010 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
+				BuildIndependentTargetsInParallel = 1;
 				LastUpgradeCheck = 1540;
+				LastSwiftUpdateCheck = 1540;
+				TargetAttributes = {
+					AA000007 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
 			};
 			buildConfigurationList = AA000011 /* Build configuration list for PBXProject "App" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -780,14 +765,19 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 		AA000012 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = __TEAM_ID__;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = __BUNDLE_ID__;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTED_PLATFORMS = iphoneos;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -796,14 +786,19 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 		AA000013 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = __TEAM_ID__;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = __BUNDLE_ID__;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTED_PLATFORMS = iphoneos;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -813,6 +808,7 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				SDKROOT = iphoneos;
 			};
 			name = Debug;
 		};
@@ -820,6 +816,7 @@ const PROJECT_PBXPROJ_TEMPLATE: &str = r#"// !$*UTF8*$!
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				SDKROOT = iphoneos;
 			};
 			name = Release;
 		};
@@ -858,16 +855,44 @@ fn create_minimal_xcode_project(dir: &Path, bundle_id: &str, team_id: &str) -> R
         .replace("__BUNDLE_ID__", bundle_id)
         .replace("__TEAM_ID__", team_id);
     fs::write(proj_dir.join("project.pbxproj"), pbxproj)?;
-    fs::write(dir.join("main.swift"), "import UIKit\n")?;
+    fs::write(
+        dir.join("App.swift"),
+        r#"import SwiftUI
+
+@main
+struct ProvisioningProbeApp: App {
+    var body: some Scene {
+        WindowGroup {
+            Text("Provisioning Probe")
+        }
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.join("Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+"#,
+    )?;
     Ok(())
 }
 
-fn auto_provision(bundle_id: &str, team_id: &str) -> Result<()> {
+fn auto_provision(bundle_id: &str, team_id: &str, device_udid: &str) -> Result<()> {
     let temp = TempDir::new()?;
-    create_minimal_xcode_project(temp.path(), bundle_id, &team_id)?;
+    create_minimal_xcode_project(temp.path(), bundle_id, team_id)?;
 
     let project_path = temp.path().join("App.xcodeproj");
-    xcrun::build_for_generic_ios(&project_path, false, "App", false).map_err(|err| {
+    xcrun::build_for_device(&project_path, false, "App", device_udid, false).map_err(|err| {
         TossError::Signing(format!(
             "auto-provisioning failed for bundle ID '{}': {}",
             bundle_id, err
@@ -877,122 +902,553 @@ fn auto_provision(bundle_id: &str, team_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn scan_signing_targets(app_path: &Path) -> Result<Vec<(PathBuf, BundleKind, String)>> {
+    let mut targets = vec![(
+        app_path.to_path_buf(),
+        BundleKind::App,
+        extract_bundle_id(app_path)?,
+    )];
+    collect_app_extensions(app_path, &mut targets)?;
+    Ok(targets)
+}
+
+fn collect_app_extensions(
+    bundle_path: &Path,
+    targets: &mut Vec<(PathBuf, BundleKind, String)>,
+) -> Result<()> {
+    let plugins_dir = bundle_path.join("PlugIns");
+    if !plugins_dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&plugins_dir)?.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "appex") {
+            let bundle_id = extract_bundle_id(&path)?;
+            targets.push((path.clone(), BundleKind::AppExtension, bundle_id));
+            collect_app_extensions(&path, targets)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn list_profile_paths(profiles: &[ProvisioningProfile]) -> Vec<PathBuf> {
+    profiles.iter().map(|p| p.path.clone()).collect()
+}
+
+fn resolve_bundle_target(
+    config: &Config,
+    available_profiles: &mut Vec<ProvisioningProfile>,
+    cleanup_profiles: &mut Vec<PathBuf>,
+    identity: &SigningIdentity,
+    device_udid: &str,
+    bundle_path: &Path,
+    kind: BundleKind,
+    original_bundle_id: &str,
+    preferred_bundle_id: &str,
+    profile_override: Option<&Path>,
+) -> Result<BundleTarget> {
+    if let Some(path) = profile_override {
+        let profile = load_profile_from_path(path)?;
+        let issues =
+            profile_compatibility_issues(&profile, identity, original_bundle_id, device_udid);
+        if !issues.is_empty() {
+            return Err(TossError::Signing(format!(
+                "override profile '{}' is incompatible with {} '{}': {}",
+                path.display(),
+                kind.display_name(),
+                original_bundle_id,
+                issues.join("; ")
+            )));
+        }
+        return Ok(BundleTarget {
+            path: bundle_path.to_path_buf(),
+            kind,
+            original_bundle_id: original_bundle_id.to_string(),
+            final_bundle_id: original_bundle_id.to_string(),
+            profile,
+        });
+    }
+
+    if let Some(profile) = match_compatible_profile(
+        available_profiles,
+        original_bundle_id,
+        identity,
+        device_udid,
+    )? {
+        return Ok(BundleTarget {
+            path: bundle_path.to_path_buf(),
+            kind,
+            original_bundle_id: original_bundle_id.to_string(),
+            final_bundle_id: original_bundle_id.to_string(),
+            profile,
+        });
+    }
+
+    let final_bundle_id = preferred_bundle_id.to_string();
+
+    if let Some(profile) =
+        match_compatible_profile(available_profiles, &final_bundle_id, identity, device_udid)?
+    {
+        return Ok(BundleTarget {
+            path: bundle_path.to_path_buf(),
+            kind,
+            original_bundle_id: original_bundle_id.to_string(),
+            final_bundle_id,
+            profile,
+        });
+    }
+
+    let team_id = temp_team_id(config)?;
+    let before_paths = list_profile_paths(available_profiles);
+    println!(
+        "Auto-provisioning {} '{}' for device {}...",
+        kind.display_name(),
+        final_bundle_id,
+        device_udid
+    );
+    auto_provision(&final_bundle_id, team_id, device_udid)?;
+
+    *available_profiles = find_provisioning_profiles()?;
+    let profile =
+        match_compatible_profile(available_profiles, &final_bundle_id, identity, device_udid)?
+            .ok_or_else(|| {
+                TossError::Signing(format!(
+                    "auto-provisioning finished but no compatible profile was found for {} '{}'",
+                    kind.display_name(),
+                    final_bundle_id
+                ))
+            })?;
+
+    cleanup_profiles.extend(profiles_created_for_bundle_id(
+        &before_paths,
+        available_profiles,
+        &final_bundle_id,
+    ));
+
+    Ok(BundleTarget {
+        path: bundle_path.to_path_buf(),
+        kind,
+        original_bundle_id: original_bundle_id.to_string(),
+        final_bundle_id,
+        profile,
+    })
+}
+
 fn resolve_signing_plan(
     config: &Config,
     extracted: &ExtractedApp,
+    identity: &SigningIdentity,
+    device_udid: &str,
     profile_override: Option<&str>,
 ) -> Result<SigningPlan> {
-    if let Some(path) = profile_override {
-        let profile = load_profile_from_path(Path::new(path))?;
-        return Ok(SigningPlan {
-            profile,
-            final_bundle_id: extracted.bundle_id.clone(),
-            cleanup_profiles: Vec::new(),
-        });
-    }
+    let discovered = scan_signing_targets(&extracted.app_path)?;
+    let mut available_profiles = find_provisioning_profiles().unwrap_or_default();
+    let mut cleanup_profiles = Vec::new();
+    let override_path = profile_override.map(Path::new);
 
-    if let Ok(profile) = find_provisioning_profiles()
-        .and_then(|profiles| match_profile(&profiles, &extracted.bundle_id))
+    let (main_path, main_kind, main_original_bundle_id) = discovered
+        .first()
+        .cloned()
+        .ok_or_else(|| TossError::Signing("no app bundle discovered after extraction".into()))?;
+
+    let main_preferred_bundle_id = if match_compatible_profile(
+        &available_profiles,
+        &main_original_bundle_id,
+        identity,
+        device_udid,
+    )?
+    .is_some()
+        || override_path.is_some()
     {
-        return Ok(SigningPlan {
-            profile,
-            final_bundle_id: extracted.bundle_id.clone(),
-            cleanup_profiles: Vec::new(),
-        });
+        main_original_bundle_id.clone()
+    } else {
+        let generated = generate_temp_bundle_id(config, &main_path, &main_original_bundle_id)?;
+        println!(
+            "No usable profile for '{}' found, switching main app to temporary bundle ID '{}'.",
+            main_original_bundle_id, generated
+        );
+        generated
+    };
+
+    let mut targets = Vec::new();
+    let main_target = resolve_bundle_target(
+        config,
+        &mut available_profiles,
+        &mut cleanup_profiles,
+        identity,
+        device_udid,
+        &main_path,
+        main_kind,
+        &main_original_bundle_id,
+        &main_preferred_bundle_id,
+        override_path,
+    )?;
+    let main_final_bundle_id = main_target.final_bundle_id.clone();
+    targets.push(main_target);
+
+    for (path, kind, original_bundle_id) in discovered.into_iter().skip(1) {
+        let preferred_bundle_id = if match_compatible_profile(
+            &available_profiles,
+            &original_bundle_id,
+            identity,
+            device_udid,
+        )?
+        .is_some()
+        {
+            original_bundle_id.clone()
+        } else {
+            derive_extension_bundle_id(
+                &main_original_bundle_id,
+                &main_final_bundle_id,
+                &original_bundle_id,
+                &path,
+                config,
+            )?
+        };
+
+        let target = resolve_bundle_target(
+            config,
+            &mut available_profiles,
+            &mut cleanup_profiles,
+            identity,
+            device_udid,
+            &path,
+            kind,
+            &original_bundle_id,
+            &preferred_bundle_id,
+            None,
+        )?;
+        targets.push(target);
     }
 
-    ensure_no_app_extensions(&extracted.app_path)?;
-
-    let temp_bundle_id =
-        generate_temp_bundle_id(config, &extracted.app_path, &extracted.bundle_id)?;
-    println!(
-        "No usable profile for '{}' found, switching to temporary bundle ID '{}'.",
-        extracted.bundle_id, temp_bundle_id
-    );
-
-    let profiles_before = find_provisioning_profiles().unwrap_or_default();
-    if let Ok(profile) = match_profile(&profiles_before, &temp_bundle_id) {
-        return Ok(SigningPlan {
-            profile,
-            final_bundle_id: temp_bundle_id,
-            cleanup_profiles: Vec::new(),
-        });
-    }
-
-    println!(
-        "Auto-provisioning temporary bundle ID '{}'...",
-        temp_bundle_id
-    );
-    let before_paths = list_profile_paths(&profiles_before);
-    let team_id = temp_team_id(config)?;
-    auto_provision(&temp_bundle_id, team_id)?;
-
-    let profiles_after = find_provisioning_profiles()?;
-    let profile = match_profile(&profiles_after, &temp_bundle_id)?;
-    let cleanup_profiles =
-        profiles_created_for_bundle_id(&before_paths, &profiles_after, &temp_bundle_id);
+    let mut seen = HashSet::new();
+    cleanup_profiles.retain(|path| seen.insert(path.clone()));
 
     Ok(SigningPlan {
-        profile,
-        final_bundle_id: temp_bundle_id,
+        targets,
         cleanup_profiles,
     })
 }
 
-// ---------------------------------------------------------------------------
-// Top-level workflow
-// ---------------------------------------------------------------------------
+fn extract_profile_entitlements(
+    profile_path: &Path,
+    temp_dir: &Path,
+    name: &str,
+) -> Result<PathBuf> {
+    let decoded = decode_provisioning_profile(profile_path)?;
+    let ent_path = temp_dir.join(format!("{}_profile_entitlements.plist", name));
+    let output = Command::new("plutil")
+        .args([
+            "-extract",
+            "Entitlements",
+            "xml1",
+            "-o",
+            &ent_path.to_string_lossy(),
+            &decoded.path().to_string_lossy(),
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(TossError::Signing(format!(
+            "failed to extract entitlements from {}: {}",
+            profile_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(ent_path)
+}
+
+fn dump_existing_entitlements(
+    bundle_path: &Path,
+    temp_dir: &Path,
+    name: &str,
+) -> Result<Option<PathBuf>> {
+    let output = Command::new("codesign")
+        .args(["-d", "--entitlements", ":-"])
+        .arg(bundle_path)
+        .output()?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let start = combined.find("<?xml").or_else(|| combined.find("<plist"));
+    let end = combined.rfind("</plist>");
+
+    match (start, end) {
+        (Some(start), Some(end)) if start < end => {
+            let ent_path = temp_dir.join(format!("{}_original_entitlements.plist", name));
+            fs::write(&ent_path, &combined[start..end + "</plist>".len()])?;
+            Ok(Some(ent_path))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn plist_to_json_value(plist_path: &Path) -> Result<Value> {
+    let output = Command::new("plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(plist_path)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(TossError::Signing(format!(
+            "failed to convert {} to json: {}",
+            plist_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn json_value_to_plist(value: &Value, output_path: &Path) -> Result<()> {
+    let json_file = NamedTempFile::new()?;
+    fs::write(json_file.path(), serde_json::to_vec(value)?)?;
+
+    let output = Command::new("plutil")
+        .args([
+            "-convert",
+            "xml1",
+            "-o",
+            &output_path.to_string_lossy(),
+            &json_file.path().to_string_lossy(),
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(TossError::Signing(format!(
+            "failed to convert entitlements json to plist: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+fn required_profile_entitlement_keys() -> [&'static str; 5] {
+    [
+        "application-identifier",
+        "com.apple.developer.team-identifier",
+        "keychain-access-groups",
+        "get-task-allow",
+        "aps-environment",
+    ]
+}
+
+fn merged_entitlements(
+    profile_entitlements: &Value,
+    original_entitlements: Option<&Value>,
+) -> Value {
+    let profile_obj = match profile_entitlements.as_object() {
+        Some(obj) => obj,
+        None => return profile_entitlements.clone(),
+    };
+
+    let original_obj = original_entitlements.and_then(Value::as_object);
+    let mut merged = Map::new();
+
+    if let Some(original_obj) = original_obj {
+        for key in original_obj.keys() {
+            if let Some(value) = profile_obj.get(key) {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    for key in required_profile_entitlement_keys() {
+        if let Some(value) = profile_obj.get(key) {
+            merged.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if merged.is_empty() {
+        Value::Object(profile_obj.clone())
+    } else {
+        Value::Object(merged)
+    }
+}
+
+fn create_codesign_entitlements(
+    target: &BundleTarget,
+    temp_dir: &Path,
+    name: &str,
+) -> Result<PathBuf> {
+    let profile_entitlements = extract_profile_entitlements(&target.profile.path, temp_dir, name)?;
+    let profile_json = plist_to_json_value(&profile_entitlements)?;
+    let original_json = dump_existing_entitlements(&target.path, temp_dir, name)?
+        .map(|path| plist_to_json_value(&path))
+        .transpose()?;
+    let merged = merged_entitlements(&profile_json, original_json.as_ref());
+    let final_path = temp_dir.join(format!("{}_codesign_entitlements.plist", name));
+    json_value_to_plist(&merged, &final_path)?;
+    Ok(final_path)
+}
+
+fn sign_frameworks(bundle_path: &Path, identity: &SigningIdentity) -> Result<()> {
+    let frameworks_dir = bundle_path.join("Frameworks");
+    if !frameworks_dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(&frameworks_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        if path.extension().is_some_and(|ext| ext == "framework") {
+            sign_frameworks(&path, identity)?;
+            codesign_path(&path, identity, None)?;
+        } else if path.extension().is_some_and(|ext| ext == "dylib") {
+            codesign_path(&path, identity, None)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn codesign_path(
+    path: &Path,
+    identity: &SigningIdentity,
+    entitlements: Option<&Path>,
+) -> Result<()> {
+    let mut command = Command::new("codesign");
+    command.args(["--force", "--sign", &identity.hash]);
+    if let Some(entitlements) = entitlements {
+        command.args(["--entitlements", &entitlements.to_string_lossy()]);
+    }
+    command.arg(path);
+
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(TossError::Signing(format!(
+            "codesign failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+fn verify_signed_app(app_path: &Path) -> Result<()> {
+    let output = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app_path)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(TossError::Signing(format!(
+            "codesign verification failed for {}: {}",
+            app_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+fn cleanup_profiles(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
 
 pub fn sign_workflow(
     config: &Config,
     ipa_path: &Path,
     device_id: &str,
+    device_udid: &str,
     identity_override: Option<&str>,
     profile_override: Option<&str>,
     launch: bool,
 ) -> Result<()> {
-    // 1. Extract IPA
     let extracted = unzip_ipa(ipa_path)?;
+    let extracted_bundle_id = extract_bundle_id(&extracted.app_path)?;
     println!(
         "Extracted: {} ({})",
-        extracted.bundle_id,
-        extracted.app_path.file_name().unwrap().to_string_lossy()
+        extracted_bundle_id,
+        extracted
+            .app_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
     );
 
-    // 2. Resolve signing identity
     let identities = list_signing_identities()?;
     let identity = select_signing_identity(&identities, identity_override)?;
     println!("Identity: {}", identity.name);
 
-    let signing_plan = resolve_signing_plan(config, &extracted, profile_override)?;
-    println!("Profile: {}", signing_plan.profile.name);
+    let signing_plan =
+        resolve_signing_plan(config, &extracted, &identity, device_udid, profile_override)?;
+
+    for target in &signing_plan.targets {
+        println!(
+            "Plan: {} {} -> {} using {}",
+            target.kind.display_name(),
+            target.original_bundle_id,
+            target.final_bundle_id,
+            target.profile.name
+        );
+    }
 
     let result = (|| {
-        if signing_plan.final_bundle_id != extracted.bundle_id {
-            rewrite_bundle_id(&extracted.app_path, &signing_plan.final_bundle_id)?;
-            println!(
-                "Bundle ID: {} → {}",
-                extracted.bundle_id, signing_plan.final_bundle_id
-            );
+        for target in &signing_plan.targets {
+            if target.final_bundle_id != target.original_bundle_id {
+                rewrite_bundle_id(&target.path, &target.final_bundle_id)?;
+                println!(
+                    "Bundle ID: {} -> {}",
+                    target.original_bundle_id, target.final_bundle_id
+                );
+            }
+
+            let embedded = target.path.join("embedded.mobileprovision");
+            fs::copy(&target.profile.path, &embedded)?;
         }
 
-        // 4. Replace embedded.mobileprovision
-        let embedded = extracted.app_path.join("embedded.mobileprovision");
-        fs::copy(&signing_plan.profile.path, &embedded)?;
+        let target_lookup: HashMap<PathBuf, BundleTarget> = signing_plan
+            .targets
+            .iter()
+            .cloned()
+            .map(|target| (target.path.clone(), target))
+            .collect();
 
-        // 5. Extract entitlements from profile
-        let ent_path =
-            extract_entitlements(&signing_plan.profile.path, extracted._temp_dir.path())?;
+        let mut signing_order = signing_plan.targets.clone();
+        signing_order.sort_by_key(|target| target.path.components().count());
 
-        // 6. Re-sign
-        resign_app(&extracted.app_path, &identity, &ent_path)?;
+        for target in signing_order
+            .iter()
+            .filter(|target| target.kind == BundleKind::AppExtension)
+        {
+            let name = normalize_bundle_component(&target.final_bundle_id);
+            let entitlements =
+                create_codesign_entitlements(target, extracted._temp_dir.path(), &name)?;
+            sign_frameworks(&target.path, &identity)?;
+            codesign_path(&target.path, &identity, Some(&entitlements))?;
+        }
 
-        // 7. Install
+        let main_target = target_lookup.get(&extracted.app_path).ok_or_else(|| {
+            TossError::Signing("main app target missing from signing plan".into())
+        })?;
+        let main_name = normalize_bundle_component(&main_target.final_bundle_id);
+        let main_entitlements =
+            create_codesign_entitlements(main_target, extracted._temp_dir.path(), &main_name)?;
+        sign_frameworks(&extracted.app_path, &identity)?;
+        codesign_path(&extracted.app_path, &identity, Some(&main_entitlements))?;
+        verify_signed_app(&extracted.app_path)?;
+
         xcrun::install_app(device_id, &extracted.app_path)?;
 
-        // 8. Optionally launch
         if launch {
-            xcrun::launch_app(device_id, &signing_plan.final_bundle_id)?;
+            xcrun::launch_app(device_id, &main_target.final_bundle_id)?;
         }
 
         Ok(())
@@ -1036,30 +1492,85 @@ mod tests {
     }
 
     #[test]
+    fn extension_bundle_id_follows_temp_main_bundle_id() {
+        let config = Config {
+            signing: SigningConfig {
+                temp_bundle_prefix: Some("cn.yangym.tmp".into()),
+                team_id: Some("FRR2796948".into()),
+            },
+            ..Config::default()
+        };
+
+        let derived = derive_extension_bundle_id(
+            "com.example.app",
+            "cn.yangym.tmp.app.1234",
+            "com.example.app.widget",
+            Path::new("/tmp/Widget.appex"),
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(derived, "cn.yangym.tmp.app.1234.widget");
+    }
+
+    #[test]
     fn created_profiles_only_include_new_exact_matches() {
         let before = vec![PathBuf::from("/tmp/existing.mobileprovision")];
         let after = vec![
             ProvisioningProfile {
                 path: PathBuf::from("/tmp/existing.mobileprovision"),
+                uuid: Some("old".into()),
                 name: "existing".into(),
                 team_ids: vec![],
                 bundle_id_pattern: "cn.yangym.tmp.kazumi.1234".into(),
+                expiration_epoch: None,
+                provisioned_devices: vec![],
+                provisions_all_devices: false,
             },
             ProvisioningProfile {
                 path: PathBuf::from("/tmp/new.mobileprovision"),
+                uuid: Some("new".into()),
                 name: "new".into(),
                 team_ids: vec![],
                 bundle_id_pattern: "cn.yangym.tmp.kazumi.1234".into(),
+                expiration_epoch: None,
+                provisioned_devices: vec![],
+                provisions_all_devices: false,
             },
             ProvisioningProfile {
                 path: PathBuf::from("/tmp/wildcard.mobileprovision"),
+                uuid: Some("wild".into()),
                 name: "wildcard".into(),
                 team_ids: vec![],
                 bundle_id_pattern: "cn.yangym.tmp.*".into(),
+                expiration_epoch: None,
+                provisioned_devices: vec![],
+                provisions_all_devices: false,
             },
         ];
 
         let created = profiles_created_for_bundle_id(&before, &after, "cn.yangym.tmp.kazumi.1234");
         assert_eq!(created, vec![PathBuf::from("/tmp/new.mobileprovision")]);
+    }
+
+    #[test]
+    fn merged_entitlements_keep_original_capabilities_but_use_profile_values() {
+        let profile = serde_json::json!({
+            "application-identifier": "TEAMID.com.example.app",
+            "com.apple.developer.team-identifier": "TEAMID",
+            "keychain-access-groups": ["TEAMID.com.example.app"],
+            "aps-environment": "development"
+        });
+        let original = serde_json::json!({
+            "aps-environment": "production",
+            "com.apple.developer.associated-domains": ["applinks:example.com"]
+        });
+
+        let merged = merged_entitlements(&profile, Some(&original));
+        let merged_obj = merged.as_object().unwrap();
+
+        assert_eq!(merged_obj.get("aps-environment").unwrap(), "development");
+        assert!(merged_obj.contains_key("application-identifier"));
+        assert!(!merged_obj.contains_key("com.apple.developer.associated-domains"));
     }
 }
