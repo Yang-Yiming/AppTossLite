@@ -20,6 +20,7 @@ pub fn run() -> Result<()> {
             "Launch app",
             "Sign IPA (resign + deploy)",
             "Local state",
+            "Cleanup temp signing cache",
             "Devices",
             "Projects",
             "Quit",
@@ -40,9 +41,10 @@ pub fn run() -> Result<()> {
             2 => actions::launch(&config),
             3 => actions::sign(&config),
             4 => crate::cli::state::show(&config),
-            5 => devices::menu(&mut config),
-            6 => projects::menu(&mut config),
-            7 => return Ok(()),
+            5 => crate::cli::cleanup::run(&config),
+            6 => devices::menu(&mut config),
+            7 => projects::menu(&mut config),
+            8 => return Ok(()),
             _ => unreachable!(),
         };
 

@@ -8,7 +8,8 @@ use crate::core::sign;
 pub fn show(config: &Config) -> Result<()> {
     let config_path = Config::path()?;
     println!("Local state");
-    println!("  config: {}", config_path.display());
+    println!("  config file: {}", config_path.display());
+    println!("  stored here: defaults, device aliases, projects, temp_bundle_prefix");
     println!(
         "  temp_bundle_prefix: {}",
         config
@@ -77,27 +78,40 @@ pub fn show(config: &Config) -> Result<()> {
                 .count();
             println!("  {} ({} files)", dir.display(), file_count);
         }
+        println!("  stored here: downloaded Xcode provisioning profiles");
     }
     println!();
 
     println!("Provisioning profiles");
-    match sign::find_provisioning_profiles() {
-        Ok(profiles) => {
-            if profiles.is_empty() {
+    match sign::inspect_provisioning_profiles() {
+        Ok(inspections) => {
+            if inspections.is_empty() {
                 println!("  <none>");
             } else {
                 let prefix = config.signing.temp_bundle_prefix.as_deref();
-                for profile in profiles {
-                    let is_temp = prefix
-                        .map(|value| profile.bundle_id_pattern.starts_with(value))
-                        .unwrap_or(false);
-                    let marker = if is_temp { " [temp]" } else { "" };
-                    println!("  {}{}", profile.name, marker);
-                    println!("    bundle: {}", profile.bundle_id_pattern);
-                    if !profile.team_ids.is_empty() {
-                        println!("    team: {}", profile.team_ids.join(", "));
+                for inspection in inspections {
+                    match inspection.profile {
+                        Some(profile) => {
+                            let is_temp = prefix
+                                .map(|value| profile.bundle_id_pattern.starts_with(value))
+                                .unwrap_or(false);
+                            let marker = if is_temp { " [temp]" } else { "" };
+                            println!("  {}{}", profile.name, marker);
+                            println!("    bundle: {}", profile.bundle_id_pattern);
+                            if !profile.team_ids.is_empty() {
+                                println!("    team: {}", profile.team_ids.join(", "));
+                            }
+                            println!("    path: {}", profile.path.display());
+                        }
+                        None => {
+                            println!("  <parse failed>");
+                            println!("    path: {}", inspection.path.display());
+                            println!(
+                                "    error: {}",
+                                inspection.error.as_deref().unwrap_or("unknown error")
+                            );
+                        }
                     }
-                    println!("    path: {}", profile.path.display());
                 }
             }
         }

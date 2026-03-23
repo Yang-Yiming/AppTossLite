@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod cleanup;
 pub mod config;
 pub mod devices;
 pub mod projects;
@@ -35,6 +36,8 @@ pub enum Commands {
     },
     /// Show all local toss state and signing cache
     State,
+    /// Remove temporary signing cache files created by toss
+    Cleanup,
     /// Install an app onto a device
     Install {
         /// Project alias (uses default if omitted)
@@ -177,6 +180,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             }
         },
         Commands::State => state::show(&config),
+        Commands::Cleanup => cleanup::run(&config),
         Commands::Install {
             project,
             device,

@@ -84,6 +84,9 @@ toss config set-temp-bundle-prefix cn.yangym.tmp
 
 # Show all local toss state and signing cache
 toss state
+
+# Remove temporary signing cache created by toss
+toss cleanup
 ```
 
 ### Interactive Mode

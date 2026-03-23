@@ -28,6 +28,13 @@ pub struct ProvisioningProfile {
     pub bundle_id_pattern: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProvisioningProfileInspection {
+    pub path: PathBuf,
+    pub profile: Option<ProvisioningProfile>,
+    pub error: Option<String>,
+}
+
 pub struct ExtractedApp {
     pub _temp_dir: TempDir,
     pub app_path: PathBuf,
@@ -229,27 +236,11 @@ pub fn select_signing_identity(
 // ---------------------------------------------------------------------------
 
 pub fn find_provisioning_profiles() -> Result<Vec<ProvisioningProfile>> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| TossError::Signing("cannot determine home directory".into()))?;
-
-    // Xcode 16+ stores profiles here; older Xcode used MobileDevice/Provisioning Profiles
-    let candidates = [
-        home.join("Library/Developer/Xcode/UserData/Provisioning Profiles"),
-        home.join("Library/MobileDevice/Provisioning Profiles"),
-    ];
-
-    let profiles_dir = candidates
-        .iter()
-        .find(|p| p.is_dir())
-        .ok_or_else(|| {
-            TossError::Signing(
-                "no provisioning profiles directory found — open Xcode → Settings → Accounts → Download Manual Profiles".into(),
-            )
-        })?;
+    let profiles_dir = provisioning_profiles_dir()?;
 
     let mut profiles = Vec::new();
 
-    for entry in fs::read_dir(profiles_dir)?.filter_map(|e| e.ok()) {
+    for entry in fs::read_dir(&profiles_dir)?.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "mobileprovision")
             && let Ok(profile) = parse_provisioning_profile(&path)
@@ -266,6 +257,54 @@ pub fn find_provisioning_profiles() -> Result<Vec<ProvisioningProfile>> {
     }
 
     Ok(profiles)
+}
+
+pub fn inspect_provisioning_profiles() -> Result<Vec<ProvisioningProfileInspection>> {
+    let profiles_dir = provisioning_profiles_dir()?;
+    let mut inspections = Vec::new();
+
+    for entry in fs::read_dir(&profiles_dir)?.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext == "mobileprovision") {
+            continue;
+        }
+
+        match parse_provisioning_profile(&path) {
+            Ok(profile) => inspections.push(ProvisioningProfileInspection {
+                path,
+                profile: Some(profile),
+                error: None,
+            }),
+            Err(err) => inspections.push(ProvisioningProfileInspection {
+                path,
+                profile: None,
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+
+    inspections.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(inspections)
+}
+
+fn provisioning_profiles_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| TossError::Signing("cannot determine home directory".into()))?;
+
+    let candidates = [
+        home.join("Library/Developer/Xcode/UserData/Provisioning Profiles"),
+        home.join("Library/MobileDevice/Provisioning Profiles"),
+    ];
+
+    candidates
+        .iter()
+        .find(|p| p.is_dir())
+        .cloned()
+        .ok_or_else(|| {
+            TossError::Signing(
+                "no provisioning profiles directory found — open Xcode → Settings → Accounts → Download Manual Profiles".into(),
+            )
+        })
 }
 
 fn plutil_extract(plist: &Path, key: &str) -> Option<String> {
