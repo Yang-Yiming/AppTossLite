@@ -78,6 +78,9 @@ toss config path
 # Set defaults
 toss config set-default-device phone
 toss config set-default-project myapp
+
+# Set prefix for temporary signing bundle IDs
+toss config set-temp-bundle-prefix cn.yangym.tmp
 ```
 
 ### Interactive Mode
@@ -101,6 +104,9 @@ Located at `~/.config/toss/config.toml`:
 [defaults]
 device = "phone"
 project = "myapp"
+
+[signing]
+temp_bundle_prefix = "com.myapp.tmp"
 
 [devices.aliases]
 phone = "00008110-001234567890001E"

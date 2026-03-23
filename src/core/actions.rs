@@ -288,7 +288,7 @@ pub fn sign_ipa(
     profile: Option<&str>,
     launch: bool,
 ) -> Result<()> {
-    let (device_id, _device_udid, device_name) = resolve_device(device, config)?;
+    let (device_id, device_udid, device_name) = resolve_device(device, config)?;
 
     let bold = Style::new().bold();
     let ipa_name = ipa
@@ -301,7 +301,15 @@ pub fn sign_ipa(
         bold.apply_to(&device_name),
     );
 
-    sign::sign_workflow(ipa, &device_id, identity, profile, launch)?;
+    sign::sign_workflow(
+        config,
+        ipa,
+        &device_id,
+        &device_udid,
+        identity,
+        profile,
+        launch,
+    )?;
 
     let green = Style::new().green().bold();
     if launch {

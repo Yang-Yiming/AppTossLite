@@ -13,6 +13,8 @@ pub struct Config {
     #[serde(default)]
     pub devices: DevicesConfig,
     #[serde(default)]
+    pub signing: SigningConfig,
+    #[serde(default)]
     pub projects: BTreeMap<String, ProjectConfig>,
 }
 
@@ -28,6 +30,12 @@ pub struct DefaultsConfig {
 pub struct DevicesConfig {
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SigningConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp_bundle_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

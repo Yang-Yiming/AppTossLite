@@ -135,6 +135,12 @@ pub enum ConfigAction {
         /// Project alias
         name: String,
     },
+    /// Set the prefix used for temporary signing bundle IDs
+    #[command(name = "set-temp-bundle-prefix")]
+    SetTempBundlePrefix {
+        /// Prefix like cn.yangym.tmp
+        prefix: String,
+    },
 }
 
 pub fn dispatch(command: Commands) -> Result<()> {
@@ -162,6 +168,9 @@ pub fn dispatch(command: Commands) -> Result<()> {
             }
             ConfigAction::SetDefaultProject { name } => {
                 config::set_default_project(&mut config, &name)
+            }
+            ConfigAction::SetTempBundlePrefix { prefix } => {
+                config::set_temp_bundle_prefix(&mut config, &prefix)
             }
         },
         Commands::Install {

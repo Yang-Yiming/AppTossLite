@@ -177,7 +177,6 @@ pub fn build_for_device(
     device_udid: &str,
     verbose: bool,
 ) -> Result<()> {
-    use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
     let project_flag = if is_workspace {
@@ -187,48 +186,44 @@ pub fn build_for_device(
     };
     let destination = format!("platform=iOS,id={}", device_udid);
 
-    let mut child = Command::new("xcodebuild")
-        .args([
-            project_flag,
-            &project_path.to_string_lossy(),
-            "-scheme",
-            scheme,
-            "-destination",
-            &destination,
-            "-allowProvisioningUpdates",
-            "-allowProvisioningDeviceRegistration",
-        ])
-        .stdout(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .stderr(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .spawn()?;
+    let mut command = Command::new("xcodebuild");
+    command.args([
+        project_flag,
+        &project_path.to_string_lossy(),
+        "-scheme",
+        scheme,
+        "-sdk",
+        "iphoneos",
+        "-destination",
+        &destination,
+        "-allowProvisioningUpdates",
+        "-allowProvisioningDeviceRegistration",
+    ]);
 
-    if !verbose {
-        // Silently consume output in quiet mode
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for _ in reader.lines() {
-                // Discard all output
-            }
+    if verbose {
+        let status = command
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        if !status.success() {
+            return Err(TossError::Xcrun("xcodebuild failed".into()));
         }
+        return Ok(());
     }
 
-    let status = child.wait()?;
-
-    if !status.success() {
-        return Err(TossError::Xcrun("xcodebuild failed".into()));
+    let output = command.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = match (stderr.is_empty(), stdout.is_empty()) {
+            (true, true) => "xcodebuild failed".to_string(),
+            (false, true) => format!("xcodebuild failed:\n{}", stderr),
+            (true, false) => format!("xcodebuild failed:\n{}", stdout),
+            (false, false) => format!("xcodebuild failed:\n{}\n{}", stderr, stdout),
+        };
+        return Err(TossError::Xcrun(detail));
     }
 
-    if !verbose {
-        println!("BUILD SUCCEEDED");
-    }
-
+    println!("BUILD SUCCEEDED");
     Ok(())
 }

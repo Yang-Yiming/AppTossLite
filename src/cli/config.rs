@@ -44,3 +44,28 @@ pub fn set_default_project(config: &mut Config, name: &str) -> Result<()> {
     println!("Default project set to '{}'", name);
     Ok(())
 }
+
+pub fn set_temp_bundle_prefix(config: &mut Config, prefix: &str) -> Result<()> {
+    let trimmed = prefix.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        return Err(TossError::Config(
+            "temp bundle prefix cannot be empty".into(),
+        ));
+    }
+
+    let is_valid = trimmed.split('.').all(|part| {
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+
+    if !is_valid {
+        return Err(TossError::Config(format!(
+            "invalid temp bundle prefix '{}' — use dot-separated ASCII letters/numbers/hyphens",
+            prefix
+        )));
+    }
+
+    config.signing.temp_bundle_prefix = Some(trimmed.to_string());
+    config.save()?;
+    println!("Temp bundle prefix set to '{}'", trimmed);
+    Ok(())
+}
