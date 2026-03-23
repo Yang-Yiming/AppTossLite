@@ -1,52 +1,45 @@
-use std::fs;
-use std::path::PathBuf;
-
 use crate::core::config::Config;
 use crate::core::error::Result;
-use crate::core::sign;
+use crate::core::state;
 
 pub fn show(config: &Config) -> Result<()> {
-    let config_path = Config::path()?;
+    let snapshot = state::collect(config)?;
     println!("Local state");
-    println!("  config file: {}", config_path.display());
+    println!("  config file: {}", snapshot.config_path.display());
     println!("  stored here: defaults, device aliases, projects, temp_bundle_prefix, team_id");
     println!(
         "  temp_bundle_prefix: {}",
-        config
-            .signing
-            .temp_bundle_prefix
-            .as_deref()
-            .unwrap_or("<unset>")
+        snapshot.temp_bundle_prefix.as_deref().unwrap_or("<unset>")
     );
     println!(
         "  team_id: {}",
-        config.signing.team_id.as_deref().unwrap_or("<unset>")
+        snapshot.team_id.as_deref().unwrap_or("<unset>")
     );
     println!(
         "  default_device: {}",
-        config.defaults.device.as_deref().unwrap_or("<unset>")
+        snapshot.default_device.as_deref().unwrap_or("<unset>")
     );
     println!(
         "  default_project: {}",
-        config.defaults.project.as_deref().unwrap_or("<unset>")
+        snapshot.default_project.as_deref().unwrap_or("<unset>")
     );
     println!();
 
-    println!("Device aliases ({})", config.devices.aliases.len());
-    if config.devices.aliases.is_empty() {
+    println!("Device aliases ({})", snapshot.device_aliases.len());
+    if snapshot.device_aliases.is_empty() {
         println!("  <none>");
     } else {
-        for (alias, udid) in &config.devices.aliases {
+        for (alias, udid) in &snapshot.device_aliases {
             println!("  {} -> {}", alias, udid);
         }
     }
     println!();
 
-    println!("Projects ({})", config.projects.len());
-    if config.projects.is_empty() {
+    println!("Projects ({})", snapshot.projects.len());
+    if snapshot.projects.is_empty() {
         println!("  <none>");
     } else {
-        for (name, project) in &config.projects {
+        for (name, project) in &snapshot.projects {
             println!("  {}", name);
             println!("    build_dir: {}", project.build_dir);
             if let Some(path) = &project.path {
@@ -62,39 +55,29 @@ pub fn show(config: &Config) -> Result<()> {
     }
     println!();
 
-    let profile_dirs = provisioning_profile_dirs()?;
-    println!("Provisioning profile dirs ({})", profile_dirs.len());
-    if profile_dirs.is_empty() {
+    println!(
+        "Provisioning profile dirs ({})",
+        snapshot.profile_dirs.len()
+    );
+    if snapshot.profile_dirs.is_empty() {
         println!("  <none>");
     } else {
-        for dir in &profile_dirs {
-            let file_count = fs::read_dir(dir)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok())
-                .filter(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .is_some_and(|ext| ext == "mobileprovision")
-                })
-                .count();
-            println!("  {} ({} files)", dir.display(), file_count);
+        for dir in &snapshot.profile_dirs {
+            println!("  {} ({} files)", dir.path.display(), dir.file_count);
         }
         println!("  stored here: downloaded Xcode provisioning profiles");
     }
     println!();
 
     println!("Provisioning profiles");
-    match sign::inspect_provisioning_profiles() {
+    match &snapshot.profile_inspections {
         Ok(inspections) => {
             if inspections.is_empty() {
                 println!("  <none>");
             } else {
-                let prefix = config.signing.temp_bundle_prefix.as_deref();
+                let prefix = snapshot.temp_bundle_prefix.as_deref();
                 for inspection in inspections {
-                    match inspection.profile {
+                    match &inspection.profile {
                         Some(profile) => {
                             let is_temp = prefix
                                 .map(|value| profile.bundle_id_pattern.starts_with(value))
@@ -123,18 +106,4 @@ pub fn show(config: &Config) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn provisioning_profile_dirs() -> Result<Vec<PathBuf>> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        crate::core::error::TossError::Config("cannot determine home directory".into())
-    })?;
-
-    Ok([
-        home.join("Library/Developer/Xcode/UserData/Provisioning Profiles"),
-        home.join("Library/MobileDevice/Provisioning Profiles"),
-    ]
-    .into_iter()
-    .filter(|path| path.is_dir())
-    .collect())
 }
