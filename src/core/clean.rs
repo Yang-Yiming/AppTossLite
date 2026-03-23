@@ -55,7 +55,9 @@ impl CleanCategory {
     pub fn purpose(self) -> &'static str {
         match self {
             Self::Config => "Stored defaults, aliases, projects, and signing settings.",
-            Self::TempProfiles => "Temporary provisioning profiles created for toss signing fallback.",
+            Self::TempProfiles => {
+                "Temporary provisioning profiles created for toss signing fallback."
+            }
             Self::ProvisioningProfiles => "All provisioning profiles shared with Xcode signing.",
             Self::DerivedData => "Xcode build intermediates and build cache.",
             Self::CargoTarget => "Rust build artifacts for this repo.",
@@ -173,7 +175,10 @@ pub fn parse_delete_categories(values: &[String], all_safe: bool) -> Result<Vec<
     Ok(selected.into_iter().collect())
 }
 
-pub fn delete_categories(report: &CleanReport, categories: &[CleanCategory]) -> Result<DeleteSummary> {
+pub fn delete_categories(
+    report: &CleanReport,
+    categories: &[CleanCategory],
+) -> Result<DeleteSummary> {
     let mut summary = DeleteSummary::default();
 
     for category in categories {

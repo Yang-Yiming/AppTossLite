@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod adapters;
 pub mod clean;
 pub mod cleanup;
 pub mod config;

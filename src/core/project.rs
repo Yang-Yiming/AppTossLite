@@ -2,8 +2,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::config::Config;
+use super::config::{Config, ProjectConfig};
 use super::error::{Result, TossError};
+use super::interaction::{WorkflowAdapter, choose_index};
+
+#[derive(Debug, Clone)]
+pub struct AddedProject {
+    pub name: String,
+    pub build_dir: PathBuf,
+    pub source_dir: Option<PathBuf>,
+    pub app_name: Option<String>,
+    pub bundle_id: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemovedProject {
+    pub name: String,
+    pub cleared_default: bool,
+}
 
 /// Extract bundle ID from an .app's Info.plist using plutil.
 pub fn extract_bundle_id(app_path: &Path) -> Result<String> {
@@ -58,6 +75,99 @@ pub fn resolve_project(config: &Config, project: &str) -> Result<(PathBuf, Strin
     };
 
     Ok((app_path, bundle_id))
+}
+
+pub fn add_project(
+    config: &mut Config,
+    path: &str,
+    alias: Option<&str>,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<AddedProject> {
+    let input_path = PathBuf::from(shellexpand(path));
+
+    if !input_path.exists() {
+        return Err(TossError::Project(format!("'{}' does not exist", path)));
+    }
+
+    let (source_dir, build_dir, project_name) =
+        if input_path.extension().is_some_and(|ext| ext == "app") {
+            let parent = input_path.parent().unwrap().to_path_buf();
+            (None, parent, None)
+        } else if let Some(proj_name) = find_xcodeproj(&input_path) {
+            let build = resolve_build_from_source(&input_path, adapter)?;
+            (Some(input_path.clone()), build, Some(proj_name))
+        } else if input_path.is_dir() {
+            (None, input_path.clone(), None)
+        } else {
+            return Err(TossError::Project(format!(
+                "'{}' is not a directory or .app bundle",
+                path
+            )));
+        };
+
+    let name = match alias {
+        Some(a) => a.to_string(),
+        None => {
+            let base = project_name.unwrap_or_else(|| {
+                build_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "project".to_string())
+            });
+            base.to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "")
+        }
+    };
+
+    let app_name = find_app_in_dir(&build_dir).ok();
+    let bundle_id = app_name.as_ref().and_then(|app| {
+        let app_path = build_dir.join(app);
+        extract_bundle_id(&app_path).ok()
+    });
+
+    let project = ProjectConfig {
+        path: source_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        build_dir: build_dir.to_string_lossy().to_string(),
+        bundle_id: bundle_id.clone(),
+        app_name: app_name.clone(),
+    };
+
+    let is_first = config.projects.is_empty();
+    config.projects.insert(name.clone(), project);
+    if is_first {
+        config.defaults.project = Some(name.clone());
+    }
+
+    config.save()?;
+
+    Ok(AddedProject {
+        name,
+        build_dir,
+        source_dir,
+        app_name,
+        bundle_id,
+        is_default: is_first,
+    })
+}
+
+pub fn remove_project(config: &mut Config, alias: &str) -> Result<RemovedProject> {
+    if config.projects.remove(alias).is_none() {
+        return Err(TossError::Project(format!(
+            "no project named '{}' found",
+            alias
+        )));
+    }
+
+    let cleared_default = config.defaults.project.as_deref() == Some(alias);
+    if cleared_default {
+        config.defaults.project = None;
+    }
+
+    config.save()?;
+    Ok(RemovedProject {
+        name: alias.to_string(),
+        cleared_default,
+    })
 }
 
 /// Find the DerivedData build directory for an Xcode project.
@@ -218,19 +328,66 @@ pub fn list_schemes(project_path: &Path, is_workspace: bool) -> Result<Vec<Strin
 }
 
 /// Select a scheme interactively or auto-select if only one.
-pub fn select_scheme(schemes: Vec<String>) -> Result<String> {
+pub fn select_scheme(schemes: Vec<String>, adapter: &mut impl WorkflowAdapter) -> Result<String> {
     match schemes.len() {
         0 => Err(TossError::Project("no schemes available".into())),
         1 => Ok(schemes[0].clone()),
         _ => {
-            use dialoguer::Select;
-            let selection = Select::new()
-                .with_prompt("Select scheme")
-                .items(&schemes)
-                .default(0)
-                .interact()
-                .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+            let selection = choose_index(
+                adapter,
+                "Select scheme",
+                &schemes,
+                TossError::Project(
+                    "multiple schemes found — specify one via an interactive adapter".into(),
+                ),
+            )?;
             Ok(schemes[selection].clone())
         }
     }
+}
+
+fn find_xcodeproj(dir: &PathBuf) -> Option<String> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .find_map(|e| {
+            let path = e.path();
+            if path.extension().is_some_and(|ext| ext == "xcodeproj") {
+                path.file_stem().map(|s| s.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn resolve_build_from_source(
+    source_dir: &Path,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<PathBuf> {
+    let matches = find_derived_data_build(source_dir)?;
+
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        _ => {
+            let items: Vec<String> = matches.iter().map(|p| p.display().to_string()).collect();
+            let selection = choose_index(
+                adapter,
+                "Multiple build directories found — choose one",
+                &items,
+                TossError::Project(
+                    "multiple build directories found — use the TUI to choose one".into(),
+                ),
+            )?;
+            Ok(matches.into_iter().nth(selection).unwrap())
+        }
+    }
+}
+
+fn shellexpand(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().to_string();
+    }
+    path.to_string()
 }

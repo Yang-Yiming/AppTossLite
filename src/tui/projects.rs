@@ -3,6 +3,8 @@ use dialoguer::{Input, Select};
 
 use crate::core::config::Config;
 use crate::core::error::{Result, TossError};
+use crate::core::project;
+use crate::tui::adapters::DialoguerAdapter;
 
 pub fn menu(config: &mut Config) -> Result<()> {
     loop {
@@ -36,7 +38,33 @@ pub fn menu(config: &mut Config) -> Result<()> {
 }
 
 fn list(config: &Config) -> Result<()> {
-    crate::cli::projects::list(config)
+    if config.projects.is_empty() {
+        println!("No projects registered.");
+        return Ok(());
+    }
+
+    let default_project = config.defaults.project.as_deref();
+    for (name, proj) in &config.projects {
+        let marker = if Some(name.as_str()) == default_project {
+            " (default)"
+        } else {
+            ""
+        };
+        println!("{}{}:", name, marker);
+        println!("  build_dir: {}", proj.build_dir);
+        if let Some(src) = &proj.path {
+            println!("  source:    {}", src);
+        }
+        if let Some(app) = &proj.app_name {
+            println!("  app_name:  {}", app);
+        }
+        if let Some(bid) = &proj.bundle_id {
+            println!("  bundle_id: {}", bid);
+        }
+        println!();
+    }
+
+    Ok(())
 }
 
 fn add(config: &mut Config) -> Result<()> {
@@ -57,7 +85,25 @@ fn add(config: &mut Config) -> Result<()> {
         Some(alias.as_str())
     };
 
-    crate::cli::projects::add(config, &path, alias_opt)
+    let mut adapter = DialoguerAdapter;
+    let added = project::add_project(config, &path, alias_opt, &mut adapter)?;
+    let green = Style::new().green().bold();
+    println!("{} Added project '{}'", green.apply_to("✓"), added.name);
+    println!("  build_dir: {}", added.build_dir.display());
+    if let Some(src) = &added.source_dir {
+        println!("  source:    {}", src.display());
+    }
+    if let Some(app) = &added.app_name {
+        println!("  app_name:  {}", app);
+    }
+    if let Some(bid) = &added.bundle_id {
+        println!("  bundle_id: {}", bid);
+    }
+    if added.is_default {
+        let dim = Style::new().dim();
+        println!("{}", dim.apply_to("  (set as default project)"));
+    }
+    Ok(())
 }
 
 fn remove(config: &mut Config) -> Result<()> {
@@ -76,5 +122,7 @@ fn remove(config: &mut Config) -> Result<()> {
         .map_err(|e| TossError::UserCancelled(e.to_string()))?;
 
     let alias = names[selection].clone();
-    crate::cli::projects::remove(config, &alias)
+    let removed = project::remove_project(config, &alias)?;
+    println!("Removed project '{}'", removed.name);
+    Ok(())
 }

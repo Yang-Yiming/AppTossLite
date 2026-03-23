@@ -249,6 +249,5 @@ fn build_with_destination(
         return Err(TossError::Xcrun(detail));
     }
 
-    println!("BUILD SUCCEEDED");
     Ok(())
 }

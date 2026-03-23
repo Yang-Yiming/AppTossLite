@@ -1,4 +1,5 @@
 mod actions;
+mod adapters;
 mod devices;
 mod projects;
 

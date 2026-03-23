@@ -3,17 +3,21 @@ use dialoguer::{Input, Select};
 use crate::core::actions;
 use crate::core::config::Config;
 use crate::core::error::{Result, TossError};
+use crate::tui::adapters::DialoguerAdapter;
 
 pub fn install(config: &Config) -> Result<()> {
-    actions::install(config, None, None, None, false)
+    let mut adapter = DialoguerAdapter;
+    actions::install(config, None, None, None, false, &mut adapter).map(|_| ())
 }
 
 pub fn launch(config: &Config) -> Result<()> {
-    actions::launch(config, None, None)
+    let mut adapter = DialoguerAdapter;
+    actions::launch(config, None, None, &mut adapter).map(|_| ())
 }
 
 pub fn run(config: &Config) -> Result<()> {
-    actions::run(config, None, None, None, false)
+    let mut adapter = DialoguerAdapter;
+    actions::run(config, None, None, None, false, &mut adapter).map(|_| ())
 }
 
 pub fn sign(config: &Config) -> Result<()> {
@@ -30,6 +34,7 @@ pub fn sign(config: &Config) -> Result<()> {
         .interact()
         .map_err(|e| TossError::UserCancelled(e.to_string()))?;
 
+    let mut adapter = DialoguerAdapter;
     actions::sign_ipa(
         config,
         std::path::Path::new(ipa_path.trim()),
@@ -37,5 +42,7 @@ pub fn sign(config: &Config) -> Result<()> {
         None,
         None,
         launch_sel == 1,
+        &mut adapter,
     )
+    .map(|_| ())
 }

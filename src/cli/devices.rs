@@ -1,7 +1,7 @@
 use console::Style;
 
 use crate::core::config::Config;
-use crate::core::device::{DeviceState, resolve_device_id};
+use crate::core::device::{self, DeviceState};
 use crate::core::error::Result;
 use crate::core::xcrun;
 
@@ -79,33 +79,14 @@ pub fn list(config: &Config) -> Result<()> {
 }
 
 pub fn alias(config: &mut Config, device: &str, name: &str) -> Result<()> {
-    // Resolve device to a UDID
     let devices = xcrun::list_devices()?;
-    let udid = resolve_device_id(device, config, &devices)?;
+    let aliased = device::alias_device(config, &devices, device, name)?;
 
-    // Find the device name for display
-    let device_name = devices
-        .iter()
-        .find(|d| d.identifier == udid)
-        .map(|d| d.name.as_str())
-        .unwrap_or("unknown");
-
-    let is_first = config.devices.aliases.is_empty();
-
-    config
-        .devices
-        .aliases
-        .insert(name.to_string(), udid.clone());
-
-    // Auto-set default if this is the first alias
-    if is_first {
-        config.defaults.device = Some(name.to_string());
-    }
-
-    config.save()?;
-
-    println!("Aliased '{}' → {} ({})", name, device_name, udid);
-    if is_first {
+    println!(
+        "Aliased '{}' → {} ({})",
+        aliased.alias, aliased.device_name, aliased.udid
+    );
+    if aliased.is_default {
         let dim = console::Style::new().dim();
         println!("{}", dim.apply_to("  (set as default device)"));
     }

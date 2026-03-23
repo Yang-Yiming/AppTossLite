@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dialoguer::Select;
 use serde_json::{Map, Value};
 use tempfile::{NamedTempFile, TempDir};
 
 use super::config::Config;
 use super::error::{Result, TossError};
+use super::interaction::{WorkflowAdapter, WorkflowEvent, choose_index};
 use super::project::extract_bundle_id;
 use super::xcrun;
 
@@ -70,6 +70,12 @@ struct BundleTarget {
 struct SigningPlan {
     targets: Vec<BundleTarget>,
     cleanup_profiles: Vec<PathBuf>,
+}
+
+pub struct SignOutcome {
+    pub app_path: PathBuf,
+    pub final_bundle_id: String,
+    pub launched: bool,
 }
 
 pub fn unzip_ipa(ipa_path: &Path) -> Result<ExtractedApp> {
@@ -180,6 +186,7 @@ pub fn list_signing_identities() -> Result<Vec<SigningIdentity>> {
 pub fn select_signing_identity(
     identities: &[SigningIdentity],
     override_name: Option<&str>,
+    adapter: &mut impl WorkflowAdapter,
 ) -> Result<SigningIdentity> {
     if let Some(query) = override_name {
         let matches: Vec<_> = identities
@@ -194,12 +201,14 @@ pub fn select_signing_identity(
             1 => Ok(matches[0].clone()),
             _ => {
                 let items: Vec<&str> = matches.iter().map(|id| id.name.as_str()).collect();
-                let selection = Select::new()
-                    .with_prompt("Multiple identities match, select one")
-                    .items(&items)
-                    .default(0)
-                    .interact()
-                    .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+                let selection = choose_index(
+                    adapter,
+                    "Multiple identities match, select one",
+                    &items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+                    TossError::Signing(
+                        "multiple signing identities match — specify one with `--identity`".into(),
+                    ),
+                )?;
                 Ok(matches[selection].clone())
             }
         };
@@ -209,12 +218,14 @@ pub fn select_signing_identity(
         1 => Ok(identities[0].clone()),
         _ => {
             let items: Vec<&str> = identities.iter().map(|id| id.name.as_str()).collect();
-            let selection = Select::new()
-                .with_prompt("Select signing identity")
-                .items(&items)
-                .default(0)
-                .interact()
-                .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+            let selection = choose_index(
+                adapter,
+                "Select signing identity",
+                &items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+                TossError::Signing(
+                    "multiple signing identities found — specify one with `--identity`".into(),
+                ),
+            )?;
             Ok(identities[selection].clone())
         }
     }
@@ -394,8 +405,14 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn identity_matches_profile(_identity: &SigningIdentity, _profile: &ProvisioningProfile) -> bool {
-    true
+fn identity_matches_profile(identity: &SigningIdentity, profile: &ProvisioningProfile) -> bool {
+    if profile.team_ids.is_empty() {
+        return true;
+    }
+
+    profile.team_ids.iter().any(|team_id| {
+        identity.name.contains(&format!("({})", team_id)) || identity.name.contains(team_id)
+    })
 }
 
 fn parse_profile_date_to_epoch(raw: &str) -> Option<u64> {
@@ -467,6 +484,7 @@ fn match_compatible_profile(
     bundle_id: &str,
     identity: &SigningIdentity,
     device_udid: &str,
+    adapter: &mut impl WorkflowAdapter,
 ) -> Result<Option<ProvisioningProfile>> {
     let exact: Vec<_> = profiles
         .iter()
@@ -499,12 +517,15 @@ fn match_compatible_profile(
                     format!("{} ({}, {})", p.name, p.bundle_id_pattern, uuid)
                 })
                 .collect();
-            let selection = Select::new()
-                .with_prompt("Multiple compatible profiles match, select one")
-                .items(&items)
-                .default(0)
-                .interact()
-                .map_err(|e| TossError::UserCancelled(e.to_string()))?;
+            let selection = choose_index(
+                adapter,
+                "Multiple compatible profiles match, select one",
+                &items,
+                TossError::Signing(
+                    "multiple compatible provisioning profiles found — specify one with `--profile`"
+                        .into(),
+                ),
+            )?;
             Ok(Some(candidates[selection].clone()))
         }
     }
@@ -948,6 +969,7 @@ fn resolve_bundle_target(
     original_bundle_id: &str,
     preferred_bundle_id: &str,
     profile_override: Option<&Path>,
+    adapter: &mut impl WorkflowAdapter,
 ) -> Result<BundleTarget> {
     if let Some(path) = profile_override {
         let profile = load_profile_from_path(path)?;
@@ -976,6 +998,7 @@ fn resolve_bundle_target(
         original_bundle_id,
         identity,
         device_udid,
+        adapter,
     )? {
         return Ok(BundleTarget {
             path: bundle_path.to_path_buf(),
@@ -988,9 +1011,13 @@ fn resolve_bundle_target(
 
     let final_bundle_id = preferred_bundle_id.to_string();
 
-    if let Some(profile) =
-        match_compatible_profile(available_profiles, &final_bundle_id, identity, device_udid)?
-    {
+    if let Some(profile) = match_compatible_profile(
+        available_profiles,
+        &final_bundle_id,
+        identity,
+        device_udid,
+        adapter,
+    )? {
         return Ok(BundleTarget {
             path: bundle_path.to_path_buf(),
             kind,
@@ -1002,24 +1029,28 @@ fn resolve_bundle_target(
 
     let team_id = temp_team_id(config)?;
     let before_paths = list_profile_paths(available_profiles);
-    println!(
-        "Auto-provisioning {} '{}' for device {}...",
-        kind.display_name(),
-        final_bundle_id,
-        device_udid
-    );
+    adapter.emit(WorkflowEvent::AutoProvisioning {
+        kind: kind.display_name().to_string(),
+        bundle_id: final_bundle_id.clone(),
+        device_udid: device_udid.to_string(),
+    })?;
     auto_provision(&final_bundle_id, team_id, device_udid)?;
 
     *available_profiles = find_provisioning_profiles()?;
-    let profile =
-        match_compatible_profile(available_profiles, &final_bundle_id, identity, device_udid)?
-            .ok_or_else(|| {
-                TossError::Signing(format!(
-                    "auto-provisioning finished but no compatible profile was found for {} '{}'",
-                    kind.display_name(),
-                    final_bundle_id
-                ))
-            })?;
+    let profile = match_compatible_profile(
+        available_profiles,
+        &final_bundle_id,
+        identity,
+        device_udid,
+        adapter,
+    )?
+    .ok_or_else(|| {
+        TossError::Signing(format!(
+            "auto-provisioning finished but no compatible profile was found for {} '{}'",
+            kind.display_name(),
+            final_bundle_id
+        ))
+    })?;
 
     cleanup_profiles.extend(profiles_created_for_bundle_id(
         &before_paths,
@@ -1042,6 +1073,7 @@ fn resolve_signing_plan(
     identity: &SigningIdentity,
     device_udid: &str,
     profile_override: Option<&str>,
+    adapter: &mut impl WorkflowAdapter,
 ) -> Result<SigningPlan> {
     let discovered = scan_signing_targets(&extracted.app_path)?;
     let mut available_profiles = find_provisioning_profiles().unwrap_or_default();
@@ -1058,6 +1090,7 @@ fn resolve_signing_plan(
         &main_original_bundle_id,
         identity,
         device_udid,
+        adapter,
     )?
     .is_some()
         || override_path.is_some()
@@ -1065,10 +1098,10 @@ fn resolve_signing_plan(
         main_original_bundle_id.clone()
     } else {
         let generated = generate_temp_bundle_id(config, &main_path, &main_original_bundle_id)?;
-        println!(
-            "No usable profile for '{}' found, switching main app to temporary bundle ID '{}'.",
-            main_original_bundle_id, generated
-        );
+        adapter.emit(WorkflowEvent::TemporaryBundleId {
+            original_bundle_id: main_original_bundle_id.clone(),
+            temporary_bundle_id: generated.clone(),
+        })?;
         generated
     };
 
@@ -1084,6 +1117,7 @@ fn resolve_signing_plan(
         &main_original_bundle_id,
         &main_preferred_bundle_id,
         override_path,
+        adapter,
     )?;
     let main_final_bundle_id = main_target.final_bundle_id.clone();
     targets.push(main_target);
@@ -1094,6 +1128,7 @@ fn resolve_signing_plan(
             &original_bundle_id,
             identity,
             device_udid,
+            adapter,
         )?
         .is_some()
         {
@@ -1119,6 +1154,7 @@ fn resolve_signing_plan(
             &original_bundle_id,
             &preferred_bundle_id,
             None,
+            adapter,
         )?;
         targets.push(target);
     }
@@ -1370,44 +1406,62 @@ pub fn sign_workflow(
     identity_override: Option<&str>,
     profile_override: Option<&str>,
     launch: bool,
-) -> Result<()> {
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<SignOutcome> {
     let extracted = unzip_ipa(ipa_path)?;
     let extracted_bundle_id = extract_bundle_id(&extracted.app_path)?;
-    println!(
-        "Extracted: {} ({})",
-        extracted_bundle_id,
-        extracted
+    adapter.emit(WorkflowEvent::ExtractedBundle {
+        bundle_id: extracted_bundle_id,
+        app_name: extracted
             .app_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
-    );
+            .to_string(),
+    })?;
 
     let identities = list_signing_identities()?;
-    let identity = select_signing_identity(&identities, identity_override)?;
-    println!("Identity: {}", identity.name);
+    let identity = select_signing_identity(&identities, identity_override, adapter)?;
+    adapter.emit(WorkflowEvent::UsingIdentity {
+        identity_name: identity.name.clone(),
+    })?;
 
-    let signing_plan =
-        resolve_signing_plan(config, &extracted, &identity, device_udid, profile_override)?;
+    let signing_plan = resolve_signing_plan(
+        config,
+        &extracted,
+        &identity,
+        device_udid,
+        profile_override,
+        adapter,
+    )?;
 
     for target in &signing_plan.targets {
-        println!(
-            "Plan: {} {} -> {} using {}",
-            target.kind.display_name(),
-            target.original_bundle_id,
-            target.final_bundle_id,
-            target.profile.name
-        );
+        adapter.emit(WorkflowEvent::SigningPlanStep {
+            kind: target.kind.display_name().to_string(),
+            original_bundle_id: target.original_bundle_id.clone(),
+            final_bundle_id: target.final_bundle_id.clone(),
+            profile_name: target.profile.name.clone(),
+        })?;
     }
 
-    let result = (|| {
+    let main_bundle_id = signing_plan
+        .targets
+        .iter()
+        .find(|target| target.path == extracted.app_path)
+        .map(|target| target.final_bundle_id.clone())
+        .ok_or_else(|| TossError::Signing("main app target missing from signing plan".into()))?;
+
+    let app_path = extracted.app_path.clone();
+    let cleanup_paths = signing_plan.cleanup_profiles.clone();
+
+    let result = (|| -> Result<SignOutcome> {
         for target in &signing_plan.targets {
             if target.final_bundle_id != target.original_bundle_id {
                 rewrite_bundle_id(&target.path, &target.final_bundle_id)?;
-                println!(
-                    "Bundle ID: {} -> {}",
-                    target.original_bundle_id, target.final_bundle_id
-                );
+                adapter.emit(WorkflowEvent::BundleIdRewritten {
+                    from: target.original_bundle_id.clone(),
+                    to: target.final_bundle_id.clone(),
+                })?;
             }
 
             let embedded = target.path.join("embedded.mobileprovision");
@@ -1451,21 +1505,34 @@ pub fn sign_workflow(
             xcrun::launch_app(device_id, &main_target.final_bundle_id)?;
         }
 
-        Ok(())
+        Ok(SignOutcome {
+            app_path: extracted.app_path.clone(),
+            final_bundle_id: main_target.final_bundle_id.clone(),
+            launched: launch,
+        })
     })();
 
-    match cleanup_profiles(&signing_plan.cleanup_profiles) {
-        Ok(()) if !signing_plan.cleanup_profiles.is_empty() => {
-            println!(
-                "Cleaned {} temporary provisioning profile(s).",
-                signing_plan.cleanup_profiles.len()
-            );
+    match cleanup_profiles(&cleanup_paths) {
+        Ok(()) if !cleanup_paths.is_empty() => {
+            adapter.emit(WorkflowEvent::CleanedTemporaryProfiles {
+                count: cleanup_paths.len(),
+            })?;
         }
         Ok(()) => {}
-        Err(err) => eprintln!("warning: failed to clean temporary profiles: {}", err),
+        Err(err) => adapter.emit(WorkflowEvent::Warning {
+            message: format!("failed to clean temporary profiles: {}", err),
+        })?,
     }
 
-    result
+    result.map(|outcome| SignOutcome {
+        app_path: app_path.clone(),
+        final_bundle_id: if outcome.final_bundle_id.is_empty() {
+            main_bundle_id
+        } else {
+            outcome.final_bundle_id
+        },
+        launched: outcome.launched,
+    })
 }
 
 #[cfg(test)]

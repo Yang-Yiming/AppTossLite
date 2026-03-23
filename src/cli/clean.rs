@@ -117,5 +117,9 @@ fn display_paths(item: &clean::CleanItem) -> Vec<&Path> {
     if item.paths.len() <= 5 {
         return item.paths.iter().map(|path| path.as_path()).collect();
     }
-    item.paths.iter().take(3).map(|path| path.as_path()).collect()
+    item.paths
+        .iter()
+        .take(3)
+        .map(|path| path.as_path())
+        .collect()
 }
