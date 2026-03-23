@@ -81,6 +81,9 @@ toss config set-default-project myapp
 
 # Set prefix for temporary signing bundle IDs
 toss config set-temp-bundle-prefix cn.yangym.tmp
+
+# Show all local toss state and signing cache
+toss state
 ```
 
 ### Interactive Mode

@@ -19,6 +19,7 @@ pub fn run() -> Result<()> {
             "Install app",
             "Launch app",
             "Sign IPA (resign + deploy)",
+            "Local state",
             "Devices",
             "Projects",
             "Quit",
@@ -38,9 +39,10 @@ pub fn run() -> Result<()> {
             1 => actions::install(&config),
             2 => actions::launch(&config),
             3 => actions::sign(&config),
-            4 => devices::menu(&mut config),
-            5 => projects::menu(&mut config),
-            6 => return Ok(()),
+            4 => crate::cli::state::show(&config),
+            5 => devices::menu(&mut config),
+            6 => projects::menu(&mut config),
+            7 => return Ok(()),
             _ => unreachable!(),
         };
 

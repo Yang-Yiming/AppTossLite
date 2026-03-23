@@ -2,6 +2,7 @@ pub mod actions;
 pub mod config;
 pub mod devices;
 pub mod projects;
+pub mod state;
 
 use clap::{Parser, Subcommand};
 
@@ -32,6 +33,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Show all local toss state and signing cache
+    State,
     /// Install an app onto a device
     Install {
         /// Project alias (uses default if omitted)
@@ -173,6 +176,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 config::set_temp_bundle_prefix(&mut config, &prefix)
             }
         },
+        Commands::State => state::show(&config),
         Commands::Install {
             project,
             device,
