@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod clean;
 pub mod config;
 pub mod device;
 pub mod error;

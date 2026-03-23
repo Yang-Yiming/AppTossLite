@@ -20,7 +20,7 @@ pub fn run() -> Result<()> {
             "Launch app",
             "Sign IPA (resign + deploy)",
             "Local state",
-            "Cleanup temp signing cache",
+            "Clean inventory / cleanup",
             "Doctor",
             "Devices",
             "Projects",
@@ -42,7 +42,10 @@ pub fn run() -> Result<()> {
             2 => actions::launch(&config),
             3 => actions::sign(&config),
             4 => crate::cli::state::show(&config),
-            5 => crate::cli::cleanup::run(&config),
+            5 => {
+                let cwd = std::env::current_dir()?;
+                crate::cli::clean::run(&config, &[], false, &cwd)
+            }
             6 => crate::cli::doctor::run(&config),
             7 => devices::menu(&mut config),
             8 => projects::menu(&mut config),

@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod clean;
 pub mod cleanup;
 pub mod config;
 pub mod devices;
@@ -37,6 +38,15 @@ pub enum Commands {
     },
     /// Show all local toss state and signing cache
     State,
+    /// Inspect local toss/Xcode/Rust files and optionally remove selected categories
+    Clean {
+        /// Categories to delete: temp-profiles, provisioning-profiles, derived-data, cargo-target
+        #[arg(long, value_delimiter = ',')]
+        delete: Vec<String>,
+        /// Delete only categories considered safe by default
+        #[arg(long)]
+        all_safe: bool,
+    },
     /// Remove temporary signing cache files created by toss
     Cleanup,
     /// Run local environment diagnostics
@@ -190,6 +200,10 @@ pub fn dispatch(command: Commands) -> Result<()> {
             ConfigAction::SetTeamId { team_id } => config::set_team_id(&mut config, &team_id),
         },
         Commands::State => state::show(&config),
+        Commands::Clean { delete, all_safe } => {
+            let cwd = std::env::current_dir()?;
+            clean::run(&config, &delete, all_safe, &cwd)
+        }
         Commands::Cleanup => cleanup::run(&config),
         Commands::Doctor => doctor::run(&config),
         Commands::Install {
