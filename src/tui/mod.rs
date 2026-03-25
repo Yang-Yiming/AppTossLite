@@ -290,7 +290,7 @@ fn log_devices(logs: &mut VecDeque<String>, config: &Config) -> Result<()> {
     append_log(logs, "devices:");
     for (i, d) in devices.iter().enumerate() {
         let alias = alias_map
-            .get(d.identifier.as_str())
+            .get(d.udid.as_str())
             .map(|a| format!(" alias={}", a))
             .unwrap_or_default();
         append_log(

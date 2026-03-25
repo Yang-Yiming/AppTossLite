@@ -118,6 +118,7 @@ pub fn install_app_workflow(
     project_name: &str,
     device_id: &str,
     device_udid: &str,
+    device_name: &str,
     prebuilt: bool,
     verbose: bool,
     adapter: &mut impl WorkflowAdapter,
@@ -143,7 +144,14 @@ pub fn install_app_workflow(
             scheme: scheme.clone(),
             device_udid: device_udid.to_string(),
         })?;
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid, verbose)?;
+        build_for_install_or_run(
+            &project_path,
+            is_workspace,
+            &scheme,
+            device_udid,
+            verbose,
+            adapter,
+        )?;
         adapter.emit(WorkflowEvent::BuildSucceeded)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
@@ -166,13 +174,20 @@ pub fn install_app_workflow(
         build_dir.join(&app_name)
     };
 
-    xcrun::install_app(device_id, &app_path)?;
+    install_app_with_fallback(device_id, device_udid, device_name, &app_path, adapter)?;
     Ok(app_path)
 }
 
-pub fn launch_app_workflow(config: &Config, project_name: &str, device_id: &str) -> Result<String> {
+pub fn launch_app_workflow(
+    config: &Config,
+    project_name: &str,
+    device_id: &str,
+    device_udid: &str,
+    device_name: &str,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<String> {
     let (_app_path, bundle_id) = resolve_project(config, project_name)?;
-    xcrun::launch_app(device_id, &bundle_id)?;
+    launch_app_with_fallback(device_id, device_udid, device_name, &bundle_id, adapter)?;
     Ok(bundle_id)
 }
 
@@ -181,6 +196,7 @@ pub fn run_app_workflow(
     project_name: &str,
     device_id: &str,
     device_udid: &str,
+    device_name: &str,
     prebuilt: bool,
     verbose: bool,
     adapter: &mut impl WorkflowAdapter,
@@ -205,7 +221,14 @@ pub fn run_app_workflow(
             scheme: scheme.clone(),
             device_udid: device_udid.to_string(),
         })?;
-        xcrun::build_for_device(&project_path, is_workspace, &scheme, device_udid, verbose)?;
+        build_for_install_or_run(
+            &project_path,
+            is_workspace,
+            &scheme,
+            device_udid,
+            verbose,
+            adapter,
+        )?;
         adapter.emit(WorkflowEvent::BuildSucceeded)?;
 
         let build_dirs = find_derived_data_build(&source_path)?;
@@ -230,8 +253,8 @@ pub fn run_app_workflow(
         (app_path, bundle_id)
     };
 
-    xcrun::install_app(device_id, &app_path)?;
-    xcrun::launch_app(device_id, &bundle_id)?;
+    install_app_with_fallback(device_id, device_udid, device_name, &app_path, adapter)?;
+    launch_app_with_fallback(device_id, device_udid, device_name, &bundle_id, adapter)?;
     Ok((app_path, bundle_id))
 }
 
@@ -262,6 +285,7 @@ pub fn install(
         &project_name,
         &device_id,
         &device_udid,
+        &device_name,
         prebuilt,
         verbose,
         adapter,
@@ -291,7 +315,14 @@ pub fn launch(
     let project_name = resolve_project_name(config, project, adapter)?;
     let (device_id, _device_udid, device_name) = resolve_device(device, config, adapter)?;
 
-    let bundle_id = launch_app_workflow(config, &project_name, &device_id)?;
+    let bundle_id = launch_app_workflow(
+        config,
+        &project_name,
+        &device_id,
+        &_device_udid,
+        &device_name,
+        adapter,
+    )?;
     adapter.emit(WorkflowEvent::Launching {
         bundle_id: bundle_id.clone(),
         device_name: device_name.clone(),
@@ -322,6 +353,7 @@ pub fn run(
         &project_name,
         &device_id,
         &device_udid,
+        &device_name,
         prebuilt,
         verbose,
         adapter,
@@ -357,6 +389,175 @@ fn record_project_tossed(config: &mut Config, project_name: &str) -> Result<()> 
     })?;
     project.last_tossed_at = Some(timestamp);
     config.save()
+}
+
+fn build_for_install_or_run(
+    project_path: &Path,
+    is_workspace: bool,
+    scheme: &str,
+    device_udid: &str,
+    verbose: bool,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<()> {
+    match xcrun::build_for_device(project_path, is_workspace, scheme, device_udid, verbose) {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_generic_ios_build(&err) => {
+            adapter.emit(WorkflowEvent::Warning {
+                message: format!(
+                    "device-specific xcodebuild destination was unavailable for '{}' — retrying with generic iOS destination",
+                    device_udid
+                ),
+            })?;
+            xcrun::build_for_generic_ios(project_path, is_workspace, scheme, verbose)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_retry_generic_ios_build(err: &TossError) -> bool {
+    match err {
+        TossError::Xcrun(message) => {
+            message.contains(
+                "Unable to find a destination matching the provided destination specifier",
+            ) || message
+                .contains("Supported platforms for the buildables in the current scheme is empty")
+        }
+        _ => false,
+    }
+}
+
+fn install_app_with_fallback(
+    device_id: &str,
+    device_udid: &str,
+    device_name: &str,
+    app_path: &Path,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<()> {
+    match xcrun::install_app(device_id, app_path) {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_devicectl_identifier(&err) => {
+            adapter.emit(WorkflowEvent::Warning {
+                message: format!(
+                    "devicectl could not locate device identifier '{}' — retrying install with hardware UDID",
+                    device_id
+                ),
+            })?;
+            retry_install_with_udid_or_name(device_udid, device_name, app_path, adapter)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn launch_app_with_fallback(
+    device_id: &str,
+    device_udid: &str,
+    device_name: &str,
+    bundle_id: &str,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<()> {
+    match xcrun::launch_app(device_id, bundle_id) {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_devicectl_identifier(&err) => {
+            adapter.emit(WorkflowEvent::Warning {
+                message: format!(
+                    "devicectl could not locate device identifier '{}' — retrying launch with hardware UDID",
+                    device_id
+                ),
+            })?;
+            retry_launch_with_udid_or_name(device_udid, device_name, bundle_id, adapter)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_retry_devicectl_identifier(err: &TossError) -> bool {
+    match err {
+        TossError::Xcrun(message) => {
+            message.contains("CoreDeviceService was unable to locate a device matching the requested device identifier")
+                || message.contains("com.apple.dt.CoreDeviceError error 1011")
+        }
+        _ => false,
+    }
+}
+
+fn retry_install_with_udid_or_name(
+    device_udid: &str,
+    device_name: &str,
+    app_path: &Path,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<()> {
+    match xcrun::install_app(device_udid, app_path) {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_devicectl_identifier(&err) && !device_name.is_empty() => {
+            adapter.emit(WorkflowEvent::Warning {
+                message: format!(
+                    "devicectl could not locate hardware UDID '{}' — retrying install with device name '{}'",
+                    device_udid, device_name
+                ),
+            })?;
+            xcrun::install_app(device_name, app_path)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn retry_launch_with_udid_or_name(
+    device_udid: &str,
+    device_name: &str,
+    bundle_id: &str,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<()> {
+    match xcrun::launch_app(device_udid, bundle_id) {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_devicectl_identifier(&err) && !device_name.is_empty() => {
+            adapter.emit(WorkflowEvent::Warning {
+                message: format!(
+                    "devicectl could not locate hardware UDID '{}' — retrying launch with device name '{}'",
+                    device_udid, device_name
+                ),
+            })?;
+            xcrun::launch_app(device_name, bundle_id)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_generic_build_for_missing_destination_errors() {
+        let err = TossError::Xcrun(
+            "xcodebuild failed:\nUnable to find a destination matching the provided destination specifier"
+                .into(),
+        );
+
+        assert!(should_retry_generic_ios_build(&err));
+    }
+
+    #[test]
+    fn does_not_retry_generic_build_for_other_errors() {
+        let err = TossError::Xcrun("xcodebuild failed:\nCode signing failed".into());
+
+        assert!(!should_retry_generic_ios_build(&err));
+    }
+
+    #[test]
+    fn retries_devicectl_identifier_for_missing_coredevice_identifier() {
+        let err = TossError::Xcrun(
+            "install failed:\nERROR: CoreDeviceService was unable to locate a device matching the requested device identifier. (com.apple.dt.CoreDeviceError error 1011)".into(),
+        );
+
+        assert!(should_retry_devicectl_identifier(&err));
+    }
+
+    #[test]
+    fn does_not_retry_devicectl_identifier_for_other_errors() {
+        let err = TossError::Xcrun("install failed:\npermission denied".into());
+
+        assert!(!should_retry_devicectl_identifier(&err));
+    }
 }
 
 pub fn sign_ipa(

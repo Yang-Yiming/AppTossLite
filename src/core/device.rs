@@ -15,6 +15,7 @@ pub struct Device {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceState {
     Connected,
+    Paired,
     Disconnected,
     Unknown(String),
 }
@@ -23,6 +24,7 @@ impl std::fmt::Display for DeviceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeviceState::Connected => write!(f, "connected"),
+            DeviceState::Paired => write!(f, "paired"),
             DeviceState::Disconnected => write!(f, "disconnected"),
             DeviceState::Unknown(s) => write!(f, "{}", s),
         }
@@ -40,13 +42,20 @@ pub struct DeviceAliasResult {
 /// Resolve a device identifier: could be an alias, UDID, or index into the device list.
 pub fn resolve_device_id(identifier: &str, config: &Config, devices: &[Device]) -> Result<String> {
     // Check alias first
-    if let Some(udid) = config.devices.aliases.get(identifier) {
-        return Ok(udid.clone());
+    if let Some(stored_id) = config.devices.aliases.get(identifier) {
+        return find_device(stored_id, devices)
+            .map(|device| device.identifier.clone())
+            .ok_or_else(|| {
+                TossError::Device(format!(
+                    "device alias '{}' points to '{}' but that device is not currently available",
+                    identifier, stored_id
+                ))
+            });
     }
 
-    // Check if it's a UDID directly matching a device
-    if devices.iter().any(|d| d.identifier == identifier) {
-        return Ok(identifier.to_string());
+    // Check if it's a currently available identifier or UDID directly
+    if let Some(device) = find_device(identifier, devices) {
+        return Ok(device.identifier.clone());
     }
 
     // Check if it's a numeric index (1-based)
@@ -104,18 +113,14 @@ pub fn alias_device(
     device_identifier: &str,
     name: &str,
 ) -> Result<DeviceAliasResult> {
-    let udid = resolve_device_id(device_identifier, config, devices)?;
-    let device_name = devices
-        .iter()
-        .find(|d| d.identifier == udid)
-        .map(|d| d.name.clone())
-        .unwrap_or_else(|| "unknown".to_string());
+    let identifier = resolve_device_id(device_identifier, config, devices)?;
+    let device = resolve_alias_target(&identifier, devices, device_identifier)?;
 
     let is_first = config.devices.aliases.is_empty();
     config
         .devices
         .aliases
-        .insert(name.to_string(), udid.clone());
+        .insert(name.to_string(), device.udid.clone());
     if is_first {
         config.defaults.device = Some(name.to_string());
     }
@@ -124,9 +129,28 @@ pub fn alias_device(
 
     Ok(DeviceAliasResult {
         alias: name.to_string(),
-        udid,
-        device_name,
+        udid: device.udid.clone(),
+        device_name: device.name.clone(),
         is_default: is_first,
+    })
+}
+
+fn find_device<'a>(identifier: &str, devices: &'a [Device]) -> Option<&'a Device> {
+    devices
+        .iter()
+        .find(|d| d.identifier == identifier || d.udid == identifier)
+}
+
+fn resolve_alias_target<'a>(
+    identifier: &str,
+    devices: &'a [Device],
+    original_input: &str,
+) -> Result<&'a Device> {
+    find_device(identifier, devices).ok_or_else(|| {
+        TossError::Device(format!(
+            "device '{}' is no longer available for aliasing",
+            original_input
+        ))
     })
 }
 
@@ -136,7 +160,7 @@ fn select_connected_device(
 ) -> Result<String> {
     let connected: Vec<&Device> = devices
         .iter()
-        .filter(|d| d.state == DeviceState::Connected)
+        .filter(|d| matches!(d.state, DeviceState::Connected | DeviceState::Paired))
         .collect();
 
     match connected.len() {
@@ -161,5 +185,119 @@ fn select_connected_device(
 
             Ok(connected[selection].identifier.clone())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::{Config, DevicesConfig};
+    use crate::core::interaction::{WorkflowAdapter, WorkflowEvent};
+
+    struct TestAdapter;
+
+    impl WorkflowAdapter for TestAdapter {
+        fn emit(&mut self, _event: WorkflowEvent) -> Result<()> {
+            Ok(())
+        }
+
+        fn choose(
+            &mut self,
+            _prompt: &str,
+            _items: &[String],
+            _default: usize,
+        ) -> Result<Option<usize>> {
+            Ok(None)
+        }
+    }
+
+    fn device(identifier: &str, udid: &str) -> Device {
+        Device {
+            name: "Phone".into(),
+            identifier: identifier.into(),
+            udid: udid.into(),
+            model: "iPhone".into(),
+            os_version: "18.0".into(),
+            state: DeviceState::Connected,
+        }
+    }
+
+    #[test]
+    fn resolves_alias_to_current_identifier_via_udid() {
+        let config = Config {
+            devices: DevicesConfig {
+                aliases: [("phone".into(), "real-udid".into())].into_iter().collect(),
+            },
+            ..Config::default()
+        };
+        let devices = vec![device("devicectl-id", "real-udid")];
+
+        let resolved = resolve_device_id("phone", &config, &devices).unwrap();
+
+        assert_eq!(resolved, "devicectl-id");
+    }
+
+    #[test]
+    fn rejects_stale_alias_when_device_is_missing() {
+        let config = Config {
+            devices: DevicesConfig {
+                aliases: [("phone".into(), "missing-udid".into())]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Config::default()
+        };
+
+        let err = resolve_device_id("phone", &config, &[]).unwrap_err();
+
+        assert!(err.to_string().contains("not currently available"));
+    }
+
+    #[test]
+    fn resolves_alias_target_to_udid_even_when_selected_by_index() {
+        let devices = vec![device("devicectl-id", "real-udid")];
+        let identifier = "devicectl-id";
+
+        let aliased = resolve_alias_target(identifier, &devices, "1").unwrap();
+
+        assert_eq!(aliased.udid, "real-udid");
+    }
+
+    #[test]
+    fn falls_back_when_default_device_alias_is_stale() {
+        let config = Config {
+            defaults: crate::core::config::DefaultsConfig {
+                device: Some("phone".into()),
+                project: None,
+            },
+            devices: DevicesConfig {
+                aliases: [("phone".into(), "missing-udid".into())]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Config::default()
+        };
+        let devices = vec![device("devicectl-id", "real-udid")];
+
+        let resolved = select_device(None, &config, &devices, &mut TestAdapter).unwrap();
+
+        assert_eq!(resolved, "devicectl-id");
+    }
+
+    #[test]
+    fn paired_devices_are_still_selectable() {
+        let config = Config::default();
+        let devices = vec![Device {
+            name: "Phone".into(),
+            identifier: "devicectl-id".into(),
+            udid: "real-udid".into(),
+            model: "iPhone".into(),
+            os_version: "18.0".into(),
+            state: DeviceState::Paired,
+        }];
+
+        let resolved = select_device(None, &config, &devices, &mut TestAdapter).unwrap();
+
+        assert_eq!(resolved, "devicectl-id");
     }
 }

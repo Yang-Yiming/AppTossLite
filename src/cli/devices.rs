@@ -29,7 +29,7 @@ pub fn list(config: &Config) -> Result<()> {
     for (i, d) in devices.iter().enumerate() {
         let idx = format!("{}", i + 1);
         let alias = alias_map
-            .get(d.identifier.as_str())
+            .get(d.udid.as_str())
             .map(|a| format!(" ({})", a))
             .unwrap_or_default();
         let name = format!("{}{}", d.name, alias);
