@@ -8,4 +8,5 @@ pub mod interaction;
 pub mod project;
 pub mod sign;
 pub mod state;
+pub mod time;
 pub mod xcrun;

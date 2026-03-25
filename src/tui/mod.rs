@@ -23,6 +23,7 @@ use crate::core::doctor;
 use crate::core::error::{Result, TossError};
 use crate::core::project;
 use crate::core::state;
+use crate::core::time::format_last_tossed;
 use crate::core::xcrun;
 use crate::tui::adapters::{RatatuiAdapter, append_log, draw_logs, prompt_input};
 
@@ -118,7 +119,7 @@ fn handle_main_selection(
     match selected {
         0 => {
             let mut adapter = RatatuiAdapter::new(terminal, logs);
-            let result = actions::run(&config, None, None, None, false, &mut adapter)?;
+            let result = actions::run(&mut config, None, None, None, false, &mut adapter)?;
             append_log(
                 logs,
                 format!(
@@ -129,7 +130,7 @@ fn handle_main_selection(
         }
         1 => {
             let mut adapter = RatatuiAdapter::new(terminal, logs);
-            let result = actions::install(&config, None, None, None, false, &mut adapter)?;
+            let result = actions::install(&mut config, None, None, None, false, &mut adapter)?;
             append_log(
                 logs,
                 format!(
@@ -521,6 +522,13 @@ fn log_projects(logs: &mut VecDeque<String>, config: &Config) {
         if let Some(bundle_id) = &proj.bundle_id {
             append_log(logs, format!("    bundle_id: {}", bundle_id));
         }
+        append_log(
+            logs,
+            format!(
+                "    last tossed at: {}",
+                format_last_tossed(proj.last_tossed_at.as_deref())
+            ),
+        );
     }
 }
 
@@ -573,6 +581,10 @@ fn build_state_details(config: &Config) -> Result<Vec<String>> {
             if let Some(app_name) = &project.app_name {
                 lines.push(format!("    app_name: {}", app_name));
             }
+            lines.push(format!(
+                "    last_tossed_at: {}",
+                format_last_tossed(project.last_tossed_at.as_deref())
+            ));
         }
     }
 

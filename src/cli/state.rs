@@ -1,6 +1,7 @@
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::core::state;
+use crate::core::time::format_last_tossed;
 
 pub fn show(config: &Config) -> Result<()> {
     let snapshot = state::collect(config)?;
@@ -51,6 +52,10 @@ pub fn show(config: &Config) -> Result<()> {
             if let Some(app_name) = &project.app_name {
                 println!("    app_name: {}", app_name);
             }
+            println!(
+                "    last_tossed_at: {}",
+                format_last_tossed(project.last_tossed_at.as_deref())
+            );
         }
     }
     println!();

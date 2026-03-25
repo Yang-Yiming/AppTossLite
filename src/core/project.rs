@@ -130,6 +130,7 @@ pub fn add_project(
         build_dir: build_dir.to_string_lossy().to_string(),
         bundle_id: bundle_id.clone(),
         app_name: app_name.clone(),
+        last_tossed_at: None,
     };
 
     let is_first = config.projects.is_empty();

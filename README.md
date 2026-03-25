@@ -129,4 +129,5 @@ path = "/Users/you/Projects/MyApp"
 build_dir = "/Users/you/Library/Developer/Xcode/DerivedData/MyApp-abc123/Build/Products/Debug-iphoneos"
 bundle_id = "com.example.myapp"
 app_name = "MyApp.app"
+last_tossed_at = "2026-03-25T12:34:56Z"
 ```

@@ -9,6 +9,7 @@ use crate::core::project::{
     resolve_project, select_scheme,
 };
 use crate::core::sign;
+use crate::core::time;
 use crate::core::xcrun;
 
 #[derive(Debug, Clone)]
@@ -245,7 +246,7 @@ fn resolve_prebuilt(config: &Config, project_name: &str, prebuilt: Option<bool>)
 }
 
 pub fn install(
-    config: &Config,
+    config: &mut Config,
     project: Option<&str>,
     device: Option<&str>,
     prebuilt: Option<bool>,
@@ -270,6 +271,7 @@ pub fn install(
         app_path: app_path.clone(),
         device_name: device_name.clone(),
     })?;
+    record_project_tossed(config, &project_name)?;
 
     Ok(InstallResult {
         project_name,
@@ -304,7 +306,7 @@ pub fn launch(
 }
 
 pub fn run(
-    config: &Config,
+    config: &mut Config,
     project: Option<&str>,
     device: Option<&str>,
     prebuilt: Option<bool>,
@@ -329,6 +331,7 @@ pub fn run(
         app_path: app_path.clone(),
         device_name: device_name.clone(),
     })?;
+    record_project_tossed(config, &project_name)?;
     adapter.emit(WorkflowEvent::Launching {
         bundle_id: bundle_id.clone(),
         device_name: device_name.clone(),
@@ -342,6 +345,18 @@ pub fn run(
         app_path,
         bundle_id,
     })
+}
+
+fn record_project_tossed(config: &mut Config, project_name: &str) -> Result<()> {
+    let timestamp = time::now_rfc3339()?;
+    let project = config.projects.get_mut(project_name).ok_or_else(|| {
+        TossError::Project(format!(
+            "unknown project '{}' while updating last toss time",
+            project_name
+        ))
+    })?;
+    project.last_tossed_at = Some(timestamp);
+    config.save()
 }
 
 pub fn sign_ipa(

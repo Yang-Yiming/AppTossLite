@@ -49,6 +49,8 @@ pub struct ProjectConfig {
     pub bundle_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tossed_at: Option<String>,
 }
 
 impl Config {
@@ -76,5 +78,43 @@ impl Config {
         let content = toml::to_string_pretty(self)?;
         fs::write(&path, content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_project_without_last_tossed_at() {
+        let config: Config = toml::from_str(
+            r#"
+            [projects.demo]
+            build_dir = "/tmp/Demo"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.projects["demo"].build_dir, "/tmp/Demo");
+        assert_eq!(config.projects["demo"].last_tossed_at, None);
+    }
+
+    #[test]
+    fn serializes_last_tossed_at_when_present() {
+        let mut config = Config::default();
+        config.projects.insert(
+            "demo".into(),
+            ProjectConfig {
+                path: None,
+                build_dir: "/tmp/Demo".into(),
+                bundle_id: None,
+                app_name: None,
+                last_tossed_at: Some("2026-03-25T12:34:56Z".into()),
+            },
+        );
+
+        let serialized = toml::to_string(&config).unwrap();
+
+        assert!(serialized.contains("last_tossed_at = \"2026-03-25T12:34:56Z\""));
     }
 }

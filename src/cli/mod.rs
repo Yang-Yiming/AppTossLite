@@ -213,7 +213,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             prebuilt,
             verbose,
         } => actions::install(
-            &config,
+            &mut config,
             project.as_deref(),
             device.as_deref(),
             prebuilt,
@@ -228,7 +228,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             prebuilt,
             verbose,
         } => actions::run(
-            &config,
+            &mut config,
             project.as_deref(),
             device.as_deref(),
             prebuilt,

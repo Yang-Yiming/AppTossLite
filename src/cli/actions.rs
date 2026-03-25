@@ -8,7 +8,7 @@ use crate::core::config::Config;
 use crate::core::error::Result;
 
 pub fn install(
-    config: &Config,
+    config: &mut Config,
     project: Option<&str>,
     device: Option<&str>,
     prebuilt: bool,
@@ -47,7 +47,7 @@ pub fn launch(config: &Config, project: Option<&str>, device: Option<&str>) -> R
 }
 
 pub fn run(
-    config: &Config,
+    config: &mut Config,
     project: Option<&str>,
     device: Option<&str>,
     prebuilt: bool,

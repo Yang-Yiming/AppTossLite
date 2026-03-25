@@ -4,6 +4,7 @@ use crate::cli::adapters::StrictCliAdapter;
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::core::project;
+use crate::core::time::format_last_tossed;
 
 pub fn add(config: &mut Config, path: &str, alias: Option<&str>) -> Result<()> {
     let mut adapter = StrictCliAdapter;
@@ -54,6 +55,10 @@ pub fn list(config: &Config) -> Result<()> {
         if let Some(bid) = &proj.bundle_id {
             println!("  bundle_id: {}", bid);
         }
+        println!(
+            "  last tossed at: {}",
+            format_last_tossed(proj.last_tossed_at.as_deref())
+        );
         println!();
     }
 
