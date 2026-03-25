@@ -19,6 +19,9 @@ cargo install --path .
 # Register your Xcode project (points at source directory)
 toss projects add ~/Projects/MyApp
 
+# Or register an IPA into project management
+toss projects add ~/Downloads/WeChat.ipa --ipa --alias wechat
+
 # Alias your device
 toss devices alias 1 phone
 
@@ -34,6 +37,10 @@ toss run
 # Add project (source dir, build dir, or .app path)
 toss projects add ~/Projects/MyApp
 toss projects add ~/Projects/MyApp --alias myapp
+
+# Add a managed IPA project
+toss projects add ~/Downloads/WeChat.ipa --ipa
+toss projects add ~/Downloads/WeChat.ipa --ipa --alias wechat
 
 # List registered projects
 toss projects list
@@ -62,8 +69,11 @@ toss run [project] [-d device]
 # Install only
 toss install [project] [-d device]
 
-# Launch only
+# Launch only (IPA projects should use `run`)
 toss launch [project] [-d device]
+
+# Direct one-off IPA signing still exists
+toss sign /path/to/app.ipa [-d device] [--launch]
 ```
 
 ### Config
@@ -101,10 +111,17 @@ Run `toss` without arguments for an interactive menu.
 
 ## How It Works
 
+Projects can be backed by either:
+1. An Xcode/source/app path
+2. A managed `.ipa` copied into toss cache
+
 When you register a project with a source directory containing `.xcodeproj`, toss automatically:
 1. Scans `~/Library/Developer/Xcode/DerivedData/` for matching builds
 2. Finds the `.app` bundle in `Build/Products/Debug-iphoneos/`
 3. Extracts the bundle ID from `Info.plist`
+
+When you register a managed IPA with `--ipa`, toss copies it into `~/Library/Caches/toss/ipas/`
+and `toss install/run <alias>` will always re-sign from that cached IPA.
 
 The first device alias and first project registration are automatically set as defaults, so `toss run` works immediately after setup.
 
@@ -125,9 +142,18 @@ team_id = "FRR2796948"
 phone = "00008110-001234567890001E"
 
 [projects.myapp]
+kind = "xcode"
 path = "/Users/you/Projects/MyApp"
 build_dir = "/Users/you/Library/Developer/Xcode/DerivedData/MyApp-abc123/Build/Products/Debug-iphoneos"
 bundle_id = "com.example.myapp"
 app_name = "MyApp.app"
+last_tossed_at = "2026-03-25T12:34:56Z"
+
+[projects.wechat]
+kind = "ipa"
+build_dir = ""
+ipa_path = "/Users/you/Library/Caches/toss/ipas/wechat-a1b2c3d4.ipa"
+original_name = "WeChat.ipa"
+bundle_id = "com.tencent.xin"
 last_tossed_at = "2026-03-25T12:34:56Z"
 ```

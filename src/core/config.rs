@@ -40,17 +40,38 @@ pub struct SigningConfig {
     pub team_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectKind {
+    #[default]
+    Xcode,
+    Ipa,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    #[serde(default)]
+    pub kind: ProjectKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(default)]
     pub build_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipa_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_tossed_at: Option<String>,
+}
+
+impl ProjectConfig {
+    pub fn is_ipa(&self) -> bool {
+        self.kind == ProjectKind::Ipa
+    }
 }
 
 impl Config {
@@ -105,10 +126,13 @@ mod tests {
         config.projects.insert(
             "demo".into(),
             ProjectConfig {
+                kind: ProjectKind::Xcode,
                 path: None,
                 build_dir: "/tmp/Demo".into(),
                 bundle_id: None,
                 app_name: None,
+                ipa_path: None,
+                original_name: None,
                 last_tossed_at: Some("2026-03-25T12:34:56Z".into()),
             },
         );
@@ -116,5 +140,41 @@ mod tests {
         let serialized = toml::to_string(&config).unwrap();
 
         assert!(serialized.contains("last_tossed_at = \"2026-03-25T12:34:56Z\""));
+    }
+
+    #[test]
+    fn loads_legacy_project_as_xcode() {
+        let config: Config = toml::from_str(
+            r#"
+            [projects.demo]
+            build_dir = "/tmp/Demo"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.projects["demo"].kind, ProjectKind::Xcode);
+    }
+
+    #[test]
+    fn serializes_ipa_project_fields() {
+        let mut config = Config::default();
+        config.projects.insert(
+            "demo".into(),
+            ProjectConfig {
+                kind: ProjectKind::Ipa,
+                path: None,
+                build_dir: String::new(),
+                bundle_id: Some("com.example.demo".into()),
+                app_name: None,
+                ipa_path: Some("/tmp/demo.ipa".into()),
+                original_name: Some("Demo.ipa".into()),
+                last_tossed_at: None,
+            },
+        );
+
+        let serialized = toml::to_string(&config).unwrap();
+
+        assert!(serialized.contains("kind = \"ipa\""));
+        assert!(serialized.contains("ipa_path = \"/tmp/demo.ipa\""));
     }
 }

@@ -17,7 +17,7 @@ use ratatui::{Frame, Terminal};
 
 use crate::core::actions;
 use crate::core::clean::{self, CleanCategory};
-use crate::core::config::Config;
+use crate::core::config::{Config, ProjectConfig, ProjectKind};
 use crate::core::device::{self, DeviceState};
 use crate::core::doctor;
 use crate::core::error::{Result, TossError};
@@ -504,32 +504,8 @@ fn log_projects(logs: &mut VecDeque<String>, config: &Config) {
     }
 
     append_log(logs, "projects:");
-    let default_project = config.defaults.project.as_deref();
-    for (name, proj) in &config.projects {
-        let marker = if Some(name.as_str()) == default_project {
-            " default"
-        } else {
-            ""
-        };
-        append_log(logs, format!("  {}{}", name, marker));
-        append_log(logs, format!("    build_dir: {}", proj.build_dir));
-        if let Some(src) = &proj.path {
-            append_log(logs, format!("    source: {}", src));
-        }
-        if let Some(app) = &proj.app_name {
-            append_log(logs, format!("    app_name: {}", app));
-        }
-        if let Some(bundle_id) = &proj.bundle_id {
-            append_log(logs, format!("    bundle_id: {}", bundle_id));
-        }
-        append_log(
-            logs,
-            format!(
-                "    last tossed at: {}",
-                format_last_tossed(proj.last_tossed_at.as_deref())
-            ),
-        );
-    }
+    log_project_group(logs, "xcode/app projects", config, ProjectKind::Xcode);
+    log_project_group(logs, "ipa projects", config, ProjectKind::Ipa);
 }
 
 fn build_state_details(config: &Config) -> Result<Vec<String>> {
@@ -569,23 +545,18 @@ fn build_state_details(config: &Config) -> Result<Vec<String>> {
     if snapshot.projects.is_empty() {
         lines.push("  <none>".into());
     } else {
-        for (name, project) in &snapshot.projects {
-            lines.push(format!("  {}", name));
-            lines.push(format!("    build_dir: {}", project.build_dir));
-            if let Some(path) = &project.path {
-                lines.push(format!("    source: {}", path));
-            }
-            if let Some(bundle_id) = &project.bundle_id {
-                lines.push(format!("    bundle_id: {}", bundle_id));
-            }
-            if let Some(app_name) = &project.app_name {
-                lines.push(format!("    app_name: {}", app_name));
-            }
-            lines.push(format!(
-                "    last_tossed_at: {}",
-                format_last_tossed(project.last_tossed_at.as_deref())
-            ));
-        }
+        push_state_project_group(
+            &mut lines,
+            "  Xcode/App Projects",
+            &snapshot.projects,
+            ProjectKind::Xcode,
+        );
+        push_state_project_group(
+            &mut lines,
+            "  IPA Projects",
+            &snapshot.projects,
+            ProjectKind::Ipa,
+        );
     }
 
     lines.push("".into());
@@ -771,24 +742,48 @@ fn add_project(
     logs: &mut VecDeque<String>,
     config: &mut Config,
 ) -> Result<()> {
-    let Some(path) = prompt_input(
-        terminal,
-        logs,
-        "Project path (.app / build dir / source dir)",
-        "",
-        false,
-    )?
+    let add_items = vec!["Xcode/App Project".to_string(), "IPA Project".to_string()];
+    let Some(kind_index) =
+        adapters::choose_from_list(terminal, logs, "Add project type", &add_items, 0)?
     else {
+        return Ok(());
+    };
+
+    let prompt = if kind_index == 1 {
+        "IPA file path"
+    } else {
+        "Project path (.app / build dir / source dir)"
+    };
+    let Some(path) = prompt_input(terminal, logs, prompt, "", false)? else {
         return Ok(());
     };
     let alias = prompt_input(terminal, logs, "Project alias (optional)", "", true)?;
 
-    let mut adapter = RatatuiAdapter::new(terminal, logs);
-    let added = project::add_project(config, &path, alias.as_deref(), &mut adapter)?;
+    let added = if kind_index == 1 {
+        project::add_ipa_project(config, &path, alias.as_deref())?
+    } else {
+        let mut adapter = RatatuiAdapter::new(terminal, logs);
+        project::add_project(config, &path, alias.as_deref(), &mut adapter)?
+    };
     append_log(logs, format!("added project '{}'", added.name));
-    append_log(logs, format!("build_dir: {}", added.build_dir.display()));
+    append_log(
+        logs,
+        format!(
+            "type: {}",
+            match added.kind {
+                ProjectKind::Xcode => "xcode/app",
+                ProjectKind::Ipa => "ipa",
+            }
+        ),
+    );
+    if let Some(build_dir) = &added.build_dir {
+        append_log(logs, format!("build_dir: {}", build_dir.display()));
+    }
     if let Some(src) = &added.source_dir {
         append_log(logs, format!("source: {}", src.display()));
+    }
+    if let Some(path) = &added.cached_ipa_path {
+        append_log(logs, format!("cached_ipa: {}", path.display()));
     }
 
     Ok(())
@@ -845,6 +840,117 @@ fn draw_main(frame: &mut Frame<'_>, selected: usize, logs: &VecDeque<String>) {
     let footer = Paragraph::new("Enter select  q quit  Esc back")
         .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(footer, chunks[2]);
+}
+
+fn log_project_group(logs: &mut VecDeque<String>, title: &str, config: &Config, kind: ProjectKind) {
+    append_log(logs, format!("{title}:"));
+    let default_project = config.defaults.project.as_deref();
+    let mut found = false;
+    for (name, project) in &config.projects {
+        if project.kind != kind {
+            continue;
+        }
+        found = true;
+        let marker = if Some(name.as_str()) == default_project {
+            " default"
+        } else {
+            ""
+        };
+        append_log(logs, format!("  {}{}", name, marker));
+        log_project_details(logs, project);
+    }
+    if !found {
+        append_log(logs, "  <none>");
+    }
+}
+
+fn log_project_details(logs: &mut VecDeque<String>, project: &ProjectConfig) {
+    append_log(
+        logs,
+        format!(
+            "    type: {}",
+            match project.kind {
+                ProjectKind::Xcode => "xcode/app",
+                ProjectKind::Ipa => "ipa",
+            }
+        ),
+    );
+    if project.kind == ProjectKind::Ipa {
+        if let Some(path) = &project.ipa_path {
+            append_log(logs, format!("    cached_ipa: {}", path));
+        }
+        if let Some(name) = &project.original_name {
+            append_log(logs, format!("    original_name: {}", name));
+        }
+    } else {
+        append_log(logs, format!("    build_dir: {}", project.build_dir));
+        if let Some(path) = &project.path {
+            append_log(logs, format!("    source: {}", path));
+        }
+        if let Some(app_name) = &project.app_name {
+            append_log(logs, format!("    app_name: {}", app_name));
+        }
+    }
+    if let Some(bundle_id) = &project.bundle_id {
+        append_log(logs, format!("    bundle_id: {}", bundle_id));
+    }
+    append_log(
+        logs,
+        format!(
+            "    last tossed at: {}",
+            format_last_tossed(project.last_tossed_at.as_deref())
+        ),
+    );
+}
+
+fn push_state_project_group(
+    lines: &mut Vec<String>,
+    title: &str,
+    projects: &[(String, ProjectConfig)],
+    kind: ProjectKind,
+) {
+    lines.push(title.into());
+    let mut found = false;
+    for (name, project) in projects {
+        if project.kind != kind {
+            continue;
+        }
+        found = true;
+        lines.push(format!("    {}", name));
+        lines.push(format!(
+            "      type: {}",
+            match project.kind {
+                ProjectKind::Xcode => "xcode/app",
+                ProjectKind::Ipa => "ipa",
+            }
+        ));
+        if project.kind == ProjectKind::Ipa {
+            if let Some(path) = &project.ipa_path {
+                lines.push(format!("      cached_ipa: {}", path));
+            }
+            if let Some(name) = &project.original_name {
+                lines.push(format!("      original_name: {}", name));
+            }
+        } else {
+            lines.push(format!("      build_dir: {}", project.build_dir));
+            if let Some(path) = &project.path {
+                lines.push(format!("      source: {}", path));
+            }
+            if let Some(app_name) = &project.app_name {
+                lines.push(format!("      app_name: {}", app_name));
+            }
+        }
+        if let Some(bundle_id) = &project.bundle_id {
+            lines.push(format!("      bundle_id: {}", bundle_id));
+        }
+        lines.push(format!(
+            "      last_tossed_at: {}",
+            format_last_tossed(project.last_tossed_at.as_deref())
+        ));
+    }
+    if !found {
+        lines.push("    <none>".into());
+    }
 }
 
 fn draw_submenu(

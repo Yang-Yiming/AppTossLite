@@ -124,6 +124,9 @@ pub enum ProjectsAction {
     Add {
         /// Path to project source directory, build directory, or .app bundle
         path: String,
+        /// Register the path as a managed .ipa file
+        #[arg(long)]
+        ipa: bool,
         /// Alias for the project
         #[arg(long)]
         alias: Option<String>,
@@ -180,8 +183,8 @@ pub fn dispatch(command: Commands) -> Result<()> {
             }
         },
         Commands::Projects { action } => match action {
-            ProjectsAction::Add { path, alias } => {
-                projects::add(&mut config, &path, alias.as_deref())
+            ProjectsAction::Add { path, ipa, alias } => {
+                projects::add(&mut config, &path, ipa, alias.as_deref())
             }
             ProjectsAction::List => projects::list(&config),
             ProjectsAction::Remove { alias } => projects::remove(&mut config, &alias),

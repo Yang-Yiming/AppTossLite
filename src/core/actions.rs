@@ -6,7 +6,7 @@ use crate::core::error::{Result, TossError};
 use crate::core::interaction::{WorkflowAdapter, WorkflowEvent, choose_index};
 use crate::core::project::{
     extract_bundle_id, find_app_in_dir, find_derived_data_build, find_xcode_project, list_schemes,
-    resolve_project, select_scheme,
+    managed_ipa_path, resolve_project, select_scheme,
 };
 use crate::core::sign;
 use crate::core::time;
@@ -263,7 +263,7 @@ fn resolve_prebuilt(config: &Config, project_name: &str, prebuilt: Option<bool>)
         config
             .projects
             .get(project_name)
-            .map(|p| p.path.is_none())
+            .map(|p| p.path.is_none() && !p.is_ipa())
             .unwrap_or(true)
     })
 }
@@ -277,6 +277,33 @@ pub fn install(
     adapter: &mut impl WorkflowAdapter,
 ) -> Result<InstallResult> {
     let project_name = resolve_project_name(config, project, adapter)?;
+    let project_config = config.projects.get(&project_name).ok_or_else(|| {
+        TossError::Project(format!(
+            "unknown project '{}' — register it with `toss projects add`",
+            project_name
+        ))
+    })?;
+
+    if project_config.is_ipa() {
+        let sign_result = sign_ipa(
+            config,
+            &managed_ipa_path(config, &project_name)?,
+            device,
+            None,
+            None,
+            false,
+            adapter,
+        )?;
+        record_project_tossed(config, &project_name)?;
+        return Ok(InstallResult {
+            project_name,
+            device_id: sign_result.device_id,
+            device_udid: sign_result.device_udid,
+            device_name: sign_result.device_name,
+            app_path: sign_result.app_path,
+        });
+    }
+
     let (device_id, device_udid, device_name) = resolve_device(device, config, adapter)?;
     let prebuilt = resolve_prebuilt(config, &project_name, prebuilt);
 
@@ -313,6 +340,16 @@ pub fn launch(
     adapter: &mut impl WorkflowAdapter,
 ) -> Result<LaunchResult> {
     let project_name = resolve_project_name(config, project, adapter)?;
+    if config
+        .projects
+        .get(&project_name)
+        .is_some_and(|project| project.is_ipa())
+    {
+        return Err(TossError::Project(format!(
+            "project '{}' is an IPA project and does not support `toss launch`; use `toss run {}` instead",
+            project_name, project_name
+        )));
+    }
     let (device_id, _device_udid, device_name) = resolve_device(device, config, adapter)?;
 
     let bundle_id = launch_app_workflow(
@@ -345,6 +382,34 @@ pub fn run(
     adapter: &mut impl WorkflowAdapter,
 ) -> Result<RunResult> {
     let project_name = resolve_project_name(config, project, adapter)?;
+    let project_config = config.projects.get(&project_name).ok_or_else(|| {
+        TossError::Project(format!(
+            "unknown project '{}' — register it with `toss projects add`",
+            project_name
+        ))
+    })?;
+
+    if project_config.is_ipa() {
+        let sign_result = sign_ipa(
+            config,
+            &managed_ipa_path(config, &project_name)?,
+            device,
+            None,
+            None,
+            true,
+            adapter,
+        )?;
+        record_project_tossed(config, &project_name)?;
+        return Ok(RunResult {
+            project_name,
+            device_id: sign_result.device_id,
+            device_udid: sign_result.device_udid,
+            device_name: sign_result.device_name,
+            app_path: sign_result.app_path,
+            bundle_id: sign_result.final_bundle_id,
+        });
+    }
+
     let (device_id, device_udid, device_name) = resolve_device(device, config, adapter)?;
     let prebuilt = resolve_prebuilt(config, &project_name, prebuilt);
 
@@ -525,6 +590,25 @@ fn retry_launch_with_udid_or_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::{Config, ProjectConfig, ProjectKind};
+    use crate::core::interaction::{WorkflowAdapter, WorkflowEvent};
+
+    struct NoopAdapter;
+
+    impl WorkflowAdapter for NoopAdapter {
+        fn emit(&mut self, _event: WorkflowEvent) -> Result<()> {
+            Ok(())
+        }
+
+        fn choose(
+            &mut self,
+            _prompt: &str,
+            _items: &[String],
+            _default: usize,
+        ) -> Result<Option<usize>> {
+            Ok(None)
+        }
+    }
 
     #[test]
     fn retries_generic_build_for_missing_destination_errors() {
@@ -557,6 +641,52 @@ mod tests {
         let err = TossError::Xcrun("install failed:\npermission denied".into());
 
         assert!(!should_retry_devicectl_identifier(&err));
+    }
+
+    #[test]
+    fn launch_rejects_ipa_projects() {
+        let mut config = Config::default();
+        config.projects.insert(
+            "wechat".into(),
+            ProjectConfig {
+                kind: ProjectKind::Ipa,
+                path: None,
+                build_dir: String::new(),
+                bundle_id: Some("com.tencent.xin".into()),
+                app_name: None,
+                ipa_path: Some("/tmp/wechat.ipa".into()),
+                original_name: Some("WeChat.ipa".into()),
+                last_tossed_at: None,
+            },
+        );
+        let mut adapter = NoopAdapter;
+
+        let err = launch(&config, Some("wechat"), None, &mut adapter).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("does not support `toss launch`; use `toss run wechat` instead")
+        );
+    }
+
+    #[test]
+    fn resolve_prebuilt_does_not_force_prebuilt_for_ipa_projects() {
+        let mut config = Config::default();
+        config.projects.insert(
+            "wechat".into(),
+            ProjectConfig {
+                kind: ProjectKind::Ipa,
+                path: None,
+                build_dir: String::new(),
+                bundle_id: None,
+                app_name: None,
+                ipa_path: Some("/tmp/wechat.ipa".into()),
+                original_name: Some("WeChat.ipa".into()),
+                last_tossed_at: None,
+            },
+        );
+
+        assert!(!resolve_prebuilt(&config, "wechat", None));
     }
 }
 

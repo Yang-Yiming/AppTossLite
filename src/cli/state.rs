@@ -1,4 +1,4 @@
-use crate::core::config::Config;
+use crate::core::config::{Config, ProjectKind};
 use crate::core::error::Result;
 use crate::core::state;
 use crate::core::time::format_last_tossed;
@@ -42,15 +42,31 @@ pub fn show(config: &Config) -> Result<()> {
     } else {
         for (name, project) in &snapshot.projects {
             println!("  {}", name);
-            println!("    build_dir: {}", project.build_dir);
-            if let Some(path) = &project.path {
-                println!("    source: {}", path);
+            println!(
+                "    type: {}",
+                match project.kind {
+                    ProjectKind::Xcode => "xcode/app",
+                    ProjectKind::Ipa => "ipa",
+                }
+            );
+            if project.kind == ProjectKind::Ipa {
+                if let Some(path) = &project.ipa_path {
+                    println!("    cached_ipa: {}", path);
+                }
+                if let Some(name) = &project.original_name {
+                    println!("    original_name: {}", name);
+                }
+            } else {
+                println!("    build_dir: {}", project.build_dir);
+                if let Some(path) = &project.path {
+                    println!("    source: {}", path);
+                }
+                if let Some(app_name) = &project.app_name {
+                    println!("    app_name: {}", app_name);
+                }
             }
             if let Some(bundle_id) = &project.bundle_id {
                 println!("    bundle_id: {}", bundle_id);
-            }
-            if let Some(app_name) = &project.app_name {
-                println!("    app_name: {}", app_name);
             }
             println!(
                 "    last_tossed_at: {}",

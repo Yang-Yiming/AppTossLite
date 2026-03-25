@@ -2,15 +2,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::config::{Config, ProjectConfig};
+use super::config::{Config, ProjectConfig, ProjectKind};
 use super::error::{Result, TossError};
 use super::interaction::{WorkflowAdapter, choose_index};
+use super::sign;
 
 #[derive(Debug, Clone)]
 pub struct AddedProject {
     pub name: String,
-    pub build_dir: PathBuf,
+    pub kind: ProjectKind,
+    pub build_dir: Option<PathBuf>,
     pub source_dir: Option<PathBuf>,
+    pub cached_ipa_path: Option<PathBuf>,
+    pub original_name: Option<String>,
     pub app_name: Option<String>,
     pub bundle_id: Option<String>,
     pub is_default: bool,
@@ -60,6 +64,13 @@ pub fn resolve_project(config: &Config, project: &str) -> Result<(PathBuf, Strin
         ))
     })?;
 
+    if proj.is_ipa() {
+        return Err(TossError::Project(format!(
+            "project '{}' is an IPA project and cannot be resolved as a prebuilt app bundle",
+            project
+        )));
+    }
+
     let build_dir = PathBuf::from(&proj.build_dir);
 
     let app_name = match &proj.app_name {
@@ -83,6 +94,15 @@ pub fn add_project(
     alias: Option<&str>,
     adapter: &mut impl WorkflowAdapter,
 ) -> Result<AddedProject> {
+    if let Some(alias) = alias
+        && config.projects.contains_key(alias)
+    {
+        return Err(TossError::Project(format!(
+            "project '{}' already exists",
+            alias
+        )));
+    }
+
     let input_path = PathBuf::from(shellexpand(path));
 
     if !input_path.exists() {
@@ -126,10 +146,89 @@ pub fn add_project(
     });
 
     let project = ProjectConfig {
+        kind: ProjectKind::Xcode,
         path: source_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
         build_dir: build_dir.to_string_lossy().to_string(),
         bundle_id: bundle_id.clone(),
         app_name: app_name.clone(),
+        ipa_path: None,
+        original_name: None,
+        last_tossed_at: None,
+    };
+
+    if config.projects.contains_key(&name) {
+        return Err(TossError::Project(format!(
+            "project '{}' already exists",
+            name
+        )));
+    }
+
+    let is_first = config.projects.is_empty();
+    config.projects.insert(name.clone(), project);
+    if is_first {
+        config.defaults.project = Some(name.clone());
+    }
+
+    config.save()?;
+
+    Ok(AddedProject {
+        name,
+        kind: ProjectKind::Xcode,
+        build_dir: Some(build_dir),
+        source_dir,
+        cached_ipa_path: None,
+        original_name: None,
+        app_name,
+        bundle_id,
+        is_default: is_first,
+    })
+}
+
+pub fn add_ipa_project(
+    config: &mut Config,
+    path: &str,
+    alias: Option<&str>,
+) -> Result<AddedProject> {
+    let input_path = PathBuf::from(shellexpand(path));
+
+    if !input_path.exists() {
+        return Err(TossError::Project(format!("'{}' does not exist", path)));
+    }
+
+    if !input_path.is_file() || input_path.extension().is_none_or(|ext| ext != "ipa") {
+        return Err(TossError::Project(format!(
+            "'{}' is not an .ipa file",
+            path
+        )));
+    }
+
+    let original_name = input_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| TossError::Project(format!("cannot determine file name for '{}'", path)))?;
+
+    let name = alias
+        .map(str::to_string)
+        .unwrap_or_else(|| sanitize_alias_from_name(&original_name));
+
+    if config.projects.contains_key(&name) {
+        return Err(TossError::Project(format!(
+            "project '{}' already exists",
+            name
+        )));
+    }
+
+    let cached_path = cache_ipa_file(&input_path, &name)?;
+    let bundle_id = inspect_ipa_bundle_id(&input_path).ok();
+
+    let project = ProjectConfig {
+        kind: ProjectKind::Ipa,
+        path: None,
+        build_dir: String::new(),
+        bundle_id: bundle_id.clone(),
+        app_name: None,
+        ipa_path: Some(cached_path.to_string_lossy().to_string()),
+        original_name: Some(original_name.clone()),
         last_tossed_at: None,
     };
 
@@ -143,9 +242,12 @@ pub fn add_project(
 
     Ok(AddedProject {
         name,
-        build_dir,
-        source_dir,
-        app_name,
+        kind: ProjectKind::Ipa,
+        build_dir: None,
+        source_dir: None,
+        cached_ipa_path: Some(cached_path),
+        original_name: Some(original_name),
+        app_name: None,
         bundle_id,
         is_default: is_first,
     })
@@ -359,6 +461,78 @@ fn find_xcodeproj(dir: &PathBuf) -> Option<String> {
                 None
             }
         })
+}
+
+pub fn managed_ipa_path(config: &Config, project: &str) -> Result<PathBuf> {
+    let proj = config.projects.get(project).ok_or_else(|| {
+        TossError::Project(format!(
+            "unknown project '{}' — register it with `toss projects add`",
+            project
+        ))
+    })?;
+
+    if !proj.is_ipa() {
+        return Err(TossError::Project(format!(
+            "project '{}' is not an IPA project",
+            project
+        )));
+    }
+
+    let ipa_path = proj.ipa_path.as_deref().ok_or_else(|| {
+        TossError::Project(format!(
+            "project '{}' is missing its cached ipa path",
+            project
+        ))
+    })?;
+
+    Ok(PathBuf::from(ipa_path))
+}
+
+pub fn toss_cache_dir() -> Result<PathBuf> {
+    let base = dirs::cache_dir()
+        .ok_or_else(|| TossError::Config("cannot determine cache directory".into()))?;
+    Ok(base.join("toss").join("ipas"))
+}
+
+fn cache_ipa_file(input_path: &Path, alias: &str) -> Result<PathBuf> {
+    let cache_dir = toss_cache_dir()?;
+    fs::create_dir_all(&cache_dir)?;
+    let file_name = format!("{}-{}.ipa", alias, short_hash(input_path));
+    let destination = cache_dir.join(file_name);
+    fs::copy(input_path, &destination)?;
+    Ok(destination)
+}
+
+fn inspect_ipa_bundle_id(path: &Path) -> Result<String> {
+    let extracted = sign::unzip_ipa(path)?;
+    extract_bundle_id(&extracted.app_path)
+}
+
+fn sanitize_alias_from_name(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string())
+        .to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "")
+}
+
+fn short_hash(path: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::UNIX_EPOCH;
+
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    if let Ok(metadata) = fs::metadata(path) {
+        metadata.len().hash(&mut hasher);
+        if let Ok(modified) = metadata.modified()
+            && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
+        {
+            duration.as_secs().hash(&mut hasher);
+        }
+    }
+    format!("{:08x}", hasher.finish() as u32)
 }
 
 fn resolve_build_from_source(
