@@ -187,21 +187,6 @@ pub fn build_for_device(
     build_with_destination(project_path, is_workspace, scheme, &destination, verbose)
 }
 
-pub fn build_for_generic_ios(
-    project_path: &Path,
-    is_workspace: bool,
-    scheme: &str,
-    verbose: bool,
-) -> Result<()> {
-    build_with_destination(
-        project_path,
-        is_workspace,
-        scheme,
-        "generic/platform=iOS",
-        verbose,
-    )
-}
-
 fn build_with_destination(
     project_path: &Path,
     is_workspace: bool,

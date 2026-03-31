@@ -462,33 +462,9 @@ fn build_for_install_or_run(
     scheme: &str,
     device_udid: &str,
     verbose: bool,
-    adapter: &mut impl WorkflowAdapter,
+    _adapter: &mut impl WorkflowAdapter,
 ) -> Result<()> {
-    match xcrun::build_for_device(project_path, is_workspace, scheme, device_udid, verbose) {
-        Ok(()) => Ok(()),
-        Err(err) if should_retry_generic_ios_build(&err) => {
-            adapter.emit(WorkflowEvent::Warning {
-                message: format!(
-                    "device-specific xcodebuild destination was unavailable for '{}' — retrying with generic iOS destination",
-                    device_udid
-                ),
-            })?;
-            xcrun::build_for_generic_ios(project_path, is_workspace, scheme, verbose)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn should_retry_generic_ios_build(err: &TossError) -> bool {
-    match err {
-        TossError::Xcrun(message) => {
-            message.contains(
-                "Unable to find a destination matching the provided destination specifier",
-            ) || message
-                .contains("Supported platforms for the buildables in the current scheme is empty")
-        }
-        _ => false,
-    }
+    xcrun::build_for_device(project_path, is_workspace, scheme, device_udid, verbose)
 }
 
 fn install_app_with_fallback(
@@ -608,23 +584,6 @@ mod tests {
         ) -> Result<Option<usize>> {
             Ok(None)
         }
-    }
-
-    #[test]
-    fn retries_generic_build_for_missing_destination_errors() {
-        let err = TossError::Xcrun(
-            "xcodebuild failed:\nUnable to find a destination matching the provided destination specifier"
-                .into(),
-        );
-
-        assert!(should_retry_generic_ios_build(&err));
-    }
-
-    #[test]
-    fn does_not_retry_generic_build_for_other_errors() {
-        let err = TossError::Xcrun("xcodebuild failed:\nCode signing failed".into());
-
-        assert!(!should_retry_generic_ios_build(&err));
     }
 
     #[test]
