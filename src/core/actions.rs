@@ -174,6 +174,10 @@ pub fn install_app_workflow(
         build_dir.join(&app_name)
     };
 
+    adapter.emit(WorkflowEvent::Installing {
+        app_path: app_path.clone(),
+        device_name: device_name.to_string(),
+    })?;
     install_app_with_fallback(device_id, device_udid, device_name, &app_path, adapter)?;
     Ok(app_path)
 }
@@ -187,6 +191,10 @@ pub fn launch_app_workflow(
     adapter: &mut impl WorkflowAdapter,
 ) -> Result<String> {
     let (_app_path, bundle_id) = resolve_project(config, project_name)?;
+    adapter.emit(WorkflowEvent::Launching {
+        bundle_id: bundle_id.clone(),
+        device_name: device_name.to_string(),
+    })?;
     launch_app_with_fallback(device_id, device_udid, device_name, &bundle_id, adapter)?;
     Ok(bundle_id)
 }
@@ -253,7 +261,15 @@ pub fn run_app_workflow(
         (app_path, bundle_id)
     };
 
+    adapter.emit(WorkflowEvent::Installing {
+        app_path: app_path.clone(),
+        device_name: device_name.to_string(),
+    })?;
     install_app_with_fallback(device_id, device_udid, device_name, &app_path, adapter)?;
+    adapter.emit(WorkflowEvent::Launching {
+        bundle_id: bundle_id.clone(),
+        device_name: device_name.to_string(),
+    })?;
     launch_app_with_fallback(device_id, device_udid, device_name, &bundle_id, adapter)?;
     Ok((app_path, bundle_id))
 }
@@ -318,10 +334,6 @@ pub fn install(
         adapter,
     )?;
 
-    adapter.emit(WorkflowEvent::Installing {
-        app_path: app_path.clone(),
-        device_name: device_name.clone(),
-    })?;
     record_project_tossed(config, &project_name)?;
 
     Ok(InstallResult {
@@ -360,11 +372,6 @@ pub fn launch(
         &device_name,
         adapter,
     )?;
-    adapter.emit(WorkflowEvent::Launching {
-        bundle_id: bundle_id.clone(),
-        device_name: device_name.clone(),
-    })?;
-
     Ok(LaunchResult {
         project_name,
         device_id,
@@ -424,15 +431,7 @@ pub fn run(
         adapter,
     )?;
 
-    adapter.emit(WorkflowEvent::Installing {
-        app_path: app_path.clone(),
-        device_name: device_name.clone(),
-    })?;
     record_project_tossed(config, &project_name)?;
-    adapter.emit(WorkflowEvent::Launching {
-        bundle_id: bundle_id.clone(),
-        device_name: device_name.clone(),
-    })?;
 
     Ok(RunResult {
         project_name,

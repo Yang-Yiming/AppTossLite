@@ -1499,9 +1499,17 @@ pub fn sign_workflow(
         codesign_path(&extracted.app_path, &identity, Some(&main_entitlements))?;
         verify_signed_app(&extracted.app_path)?;
 
+        adapter.emit(WorkflowEvent::Installing {
+            app_path: extracted.app_path.clone(),
+            device_name: device_id.to_string(),
+        })?;
         xcrun::install_app(device_id, &extracted.app_path)?;
 
         if launch {
+            adapter.emit(WorkflowEvent::Launching {
+                bundle_id: main_target.final_bundle_id.clone(),
+                device_name: device_id.to_string(),
+            })?;
             xcrun::launch_app(device_id, &main_target.final_bundle_id)?;
         }
 

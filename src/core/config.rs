@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{Result, TossError};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub defaults: DefaultsConfig,
@@ -18,7 +18,7 @@ pub struct Config {
     pub projects: BTreeMap<String, ProjectConfig>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DefaultsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
@@ -26,13 +26,13 @@ pub struct DefaultsConfig {
     pub project: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DevicesConfig {
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SigningConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temp_bundle_prefix: Option<String>,

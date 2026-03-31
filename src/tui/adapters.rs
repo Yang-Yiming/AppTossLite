@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io;
+use std::sync::mpsc::Sender;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::backend::Backend;
@@ -17,9 +18,35 @@ pub struct RatatuiAdapter<'a, B: Backend> {
     logs: &'a mut VecDeque<String>,
 }
 
+pub enum BackgroundRequest {
+    Event(WorkflowEvent),
+    Choose {
+        prompt: String,
+        items: Vec<String>,
+        default: usize,
+        response_tx: Sender<Option<usize>>,
+    },
+}
+
+pub struct BackgroundAdapter {
+    requests: Sender<BackgroundRequest>,
+}
+
 impl<'a, B: Backend> RatatuiAdapter<'a, B> {
     pub fn new(terminal: &'a mut Terminal<B>, logs: &'a mut VecDeque<String>) -> Self {
         Self { terminal, logs }
+    }
+}
+
+impl BackgroundAdapter {
+    pub fn new(requests: Sender<BackgroundRequest>) -> Self {
+        Self { requests }
+    }
+
+    fn send(&self, request: BackgroundRequest) -> Result<()> {
+        self.requests
+            .send(request)
+            .map_err(|_| TossError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "tui worker disconnected")))
     }
 }
 
@@ -31,6 +58,25 @@ impl<B: Backend> WorkflowAdapter for RatatuiAdapter<'_, B> {
 
     fn choose(&mut self, prompt: &str, items: &[String], default: usize) -> Result<Option<usize>> {
         choose_from_list(self.terminal, self.logs, prompt, items, default)
+    }
+}
+
+impl WorkflowAdapter for BackgroundAdapter {
+    fn emit(&mut self, event: WorkflowEvent) -> Result<()> {
+        self.send(BackgroundRequest::Event(event))
+    }
+
+    fn choose(&mut self, prompt: &str, items: &[String], default: usize) -> Result<Option<usize>> {
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        self.send(BackgroundRequest::Choose {
+            prompt: prompt.to_string(),
+            items: items.to_vec(),
+            default,
+            response_tx,
+        })?;
+        response_rx
+            .recv()
+            .map_err(|_| TossError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "tui input channel disconnected")))
     }
 }
 
@@ -53,11 +99,11 @@ pub fn format_event(event: &WorkflowEvent) -> String {
         WorkflowEvent::Installing {
             app_path,
             device_name,
-        } => format!("installed {} on {}", app_path.display(), device_name),
+        } => format!("installing {} on {}...", app_path.display(), device_name),
         WorkflowEvent::Launching {
             bundle_id,
             device_name,
-        } => format!("launched {} on {}", bundle_id, device_name),
+        } => format!("launching {} on {}...", bundle_id, device_name),
         WorkflowEvent::Signing {
             ipa_name,
             device_name,

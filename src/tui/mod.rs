@@ -2,6 +2,9 @@ mod adapters;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, stdout};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -12,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::core::actions;
@@ -25,7 +28,10 @@ use crate::core::project;
 use crate::core::state;
 use crate::core::time::format_last_tossed;
 use crate::core::xcrun;
-use crate::tui::adapters::{RatatuiAdapter, append_log, draw_logs, prompt_input};
+use crate::tui::adapters::{
+    BackgroundAdapter, BackgroundRequest, RatatuiAdapter, append_log, draw_logs, format_event,
+    prompt_input,
+};
 
 const MENU_ITEMS: &[MenuAction] = &[
     MenuAction::AddProject,
@@ -318,9 +324,17 @@ fn handle_project_action(
 
     match action {
         ProjectAction::Run => {
-            let mut adapter = RatatuiAdapter::new(terminal, &mut app.logs);
-            let result =
-                actions::run(config, Some(&project_name), None, None, false, &mut adapter)?;
+            let task_project = project_name.clone();
+            let result = run_progress_task(
+                terminal,
+                config,
+                app,
+                "Run app",
+                format!("starting '{}'...", project_name),
+                move |config, adapter| {
+                    actions::run(config, Some(task_project.as_str()), None, None, false, adapter)
+                },
+            )?;
             append_log(
                 &mut app.logs,
                 format!(
@@ -330,9 +344,24 @@ fn handle_project_action(
             );
         }
         ProjectAction::Install => {
-            let mut adapter = RatatuiAdapter::new(terminal, &mut app.logs);
-            let result =
-                actions::install(config, Some(&project_name), None, None, false, &mut adapter)?;
+            let task_project = project_name.clone();
+            let result = run_progress_task(
+                terminal,
+                config,
+                app,
+                "Install app",
+                format!("starting '{}'...", project_name),
+                move |config, adapter| {
+                    actions::install(
+                        config,
+                        Some(task_project.as_str()),
+                        None,
+                        None,
+                        false,
+                        adapter,
+                    )
+                },
+            )?;
             append_log(
                 &mut app.logs,
                 format!(
@@ -430,7 +459,7 @@ fn project_actions(project: &ProjectConfig) -> Vec<ProjectAction> {
 fn sign_ipa(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     logs: &mut VecDeque<String>,
-    config: &Config,
+    config: &mut Config,
 ) -> Result<()> {
     let Some(path) = prompt_input(terminal, logs, "IPA file path", "", false)? else {
         return Ok(());
@@ -440,15 +469,24 @@ fn sign_ipa(
     let launch =
         adapters::choose_from_list(terminal, logs, "After signing", &launch_items, 0)? == Some(1);
 
-    let mut adapter = RatatuiAdapter::new(terminal, logs);
-    let result = actions::sign_ipa(
+    let task_path = path.trim().to_string();
+    let result = run_progress_task_for_logs(
+        terminal,
         config,
-        std::path::Path::new(path.trim()),
-        None,
-        None,
-        None,
-        launch,
-        &mut adapter,
+        logs,
+        "Sign IPA",
+        format!("preparing '{}'...", task_path),
+        move |config, adapter| {
+            actions::sign_ipa(
+                config,
+                std::path::Path::new(task_path.as_str()),
+                None,
+                None,
+                None,
+                launch,
+                adapter,
+            )
+        },
     )?;
 
     if result.launched {
@@ -464,6 +502,109 @@ fn sign_ipa(
     }
 
     Ok(())
+}
+
+fn run_progress_task<T, F>(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    config: &mut Config,
+    app: &mut AppState,
+    title: &str,
+    initial_status: String,
+    action: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Config, &mut BackgroundAdapter) -> Result<T> + Send + 'static,
+{
+    run_progress_task_for_logs(terminal, config, &mut app.logs, title, initial_status, action)
+}
+
+fn run_progress_task_for_logs<T, F>(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    config: &mut Config,
+    logs: &mut VecDeque<String>,
+    title: &str,
+    initial_status: String,
+    action: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Config, &mut BackgroundAdapter) -> Result<T> + Send + 'static,
+{
+    let worker_config = config.clone();
+    let (request_tx, request_rx) = mpsc::channel::<BackgroundRequest>();
+    let (result_tx, result_rx) = mpsc::sync_channel::<(Config, Result<T>)>(1);
+
+    let worker = thread::spawn(move || {
+        let mut worker_config = worker_config;
+        let mut adapter = BackgroundAdapter::new(request_tx);
+        let result = action(&mut worker_config, &mut adapter);
+        let _ = result_tx.send((worker_config, result));
+    });
+
+    let mut status = initial_status;
+    let mut tick = 0usize;
+
+    loop {
+        terminal
+            .draw(|frame| draw_progress_overlay(frame, title, &status, tick, logs))
+            .map_err(|e| TossError::Io(io::Error::other(e)))?;
+
+        tick = tick.wrapping_add(1);
+
+        while let Ok(request) = request_rx.try_recv() {
+            match request {
+                BackgroundRequest::Event(event) => {
+                    status = format_event(&event);
+                    append_log(logs, status.clone());
+                }
+                BackgroundRequest::Choose {
+                    prompt,
+                    items,
+                    default,
+                    response_tx,
+                } => {
+                    status = format!("waiting for input: {}", prompt);
+                    let selection =
+                        match adapters::choose_from_list(terminal, logs, &prompt, &items, default) {
+                            Ok(selection) => selection,
+                            Err(TossError::UserCancelled(_)) => None,
+                            Err(err) => {
+                                let _ = response_tx.send(None);
+                                let _ = worker.join();
+                                return Err(err);
+                            }
+                        };
+                    let _ = response_tx.send(selection);
+                }
+            }
+        }
+
+        match result_rx.try_recv() {
+            Ok((updated_config, result)) => {
+                let join_result = worker.join();
+                if join_result.is_err() {
+                    return Err(TossError::Io(io::Error::other("tui worker panicked")));
+                }
+                if result.is_ok() {
+                    *config = updated_config;
+                }
+                return result;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = worker.join();
+                return Err(TossError::Io(io::Error::other(
+                    "tui worker disconnected unexpectedly",
+                )));
+            }
+        }
+
+        if event::poll(Duration::from_millis(120)).map_err(|e| TossError::Io(io::Error::other(e)))?
+        {
+            let _ = event::read().map_err(|e| TossError::Io(io::Error::other(e)))?;
+        }
+    }
 }
 
 fn devices_menu(
@@ -1050,6 +1191,66 @@ fn draw_home(frame: &mut Frame<'_>, config: &Config, app: &AppState) {
     frame.render_widget(footer, chunks[3]);
 }
 
+fn draw_progress_overlay(
+    frame: &mut Frame<'_>,
+    title: &str,
+    status: &str,
+    tick: usize,
+    logs: &VecDeque<String>,
+) {
+    let size = frame.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(16),
+            Constraint::Length(9),
+            Constraint::Length(2),
+        ])
+        .split(size);
+
+    let header = Paragraph::new("toss").block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Project Workspace"),
+    );
+    frame.render_widget(header, chunks[0]);
+    draw_logs(frame, chunks[2], logs);
+
+    let footer = Paragraph::new("Working... this modal stays in front until the task completes.")
+        .block(Block::default().borders(Borders::ALL).title("Status"));
+    frame.render_widget(footer, chunks[3]);
+
+    let popup = centered_rect(64, 34, size);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(block, popup);
+
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let text = vec![
+        Line::from(Span::styled(
+            "Operation in progress",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(status.to_string()),
+        Line::from(""),
+        Line::from(indeterminate_bar(inner.width.saturating_sub(2) as usize, tick)),
+        Line::from(""),
+        Line::from("Keyboard input is temporarily disabled."),
+    ];
+    let paragraph = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .block(Block::default());
+    frame.render_widget(paragraph, inner);
+}
+
 fn draw_projects_panel(frame: &mut Frame<'_>, area: Rect, config: &Config, app: &AppState) {
     let border_style = panel_border_style(app.focus == Focus::Projects);
     if config.projects.is_empty() {
@@ -1185,6 +1386,51 @@ fn draw_menu_panel(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         .wrap(Wrap { trim: false })
         .block(Block::default().title("Hint").borders(Borders::ALL));
     frame.render_widget(helper, chunks[1]);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
+}
+
+fn indeterminate_bar(width: usize, tick: usize) -> String {
+    let width = width.max(20);
+    let segment = (width / 4).max(6).min(width);
+    let travel = width.saturating_sub(segment);
+    let start = if travel == 0 {
+        0
+    } else {
+        let cycle = travel * 2;
+        let step = tick % cycle.max(1);
+        if step <= travel { step } else { cycle - step }
+    };
+
+    let mut bar = String::with_capacity(width + 2);
+    bar.push('[');
+    for index in 0..width {
+        if index >= start && index < start + segment {
+            bar.push('=');
+        } else {
+            bar.push(' ');
+        }
+    }
+    bar.push(']');
+    bar
 }
 
 fn project_detail_lines(

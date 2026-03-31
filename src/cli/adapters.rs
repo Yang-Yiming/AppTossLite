@@ -39,13 +39,13 @@ pub fn render_event(event: WorkflowEvent) {
             app_path,
             device_name,
         } => {
-            println!("Installed {} on {}.", app_path.display(), device_name);
+            println!("Installing {} on {}...", app_path.display(), device_name);
         }
         WorkflowEvent::Launching {
             bundle_id,
             device_name,
         } => {
-            println!("Launched {} on {}.", bundle_id, device_name);
+            println!("Launching {} on {}...", bundle_id, device_name);
         }
         WorkflowEvent::Signing {
             ipa_name,
