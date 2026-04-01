@@ -44,9 +44,12 @@ impl BackgroundAdapter {
     }
 
     fn send(&self, request: BackgroundRequest) -> Result<()> {
-        self.requests
-            .send(request)
-            .map_err(|_| TossError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "tui worker disconnected")))
+        self.requests.send(request).map_err(|_| {
+            TossError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "tui worker disconnected",
+            ))
+        })
     }
 }
 
@@ -74,9 +77,12 @@ impl WorkflowAdapter for BackgroundAdapter {
             default,
             response_tx,
         })?;
-        response_rx
-            .recv()
-            .map_err(|_| TossError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "tui input channel disconnected")))
+        response_rx.recv().map_err(|_| {
+            TossError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "tui input channel disconnected",
+            ))
+        })
     }
 }
 

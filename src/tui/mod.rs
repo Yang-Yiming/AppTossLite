@@ -9,7 +9,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -21,7 +21,7 @@ use ratatui::{Frame, Terminal};
 use crate::core::actions;
 use crate::core::clean::{self, CleanCategory};
 use crate::core::config::{Config, ProjectConfig, ProjectKind};
-use crate::core::device::{self, DeviceState};
+use crate::core::device::{self, Device, DeviceState};
 use crate::core::doctor;
 use crate::core::error::{Result, TossError};
 use crate::core::project;
@@ -29,8 +29,8 @@ use crate::core::state;
 use crate::core::time::format_last_tossed;
 use crate::core::xcrun;
 use crate::tui::adapters::{
-    BackgroundAdapter, BackgroundRequest, RatatuiAdapter, append_log, draw_logs, format_event,
-    prompt_input,
+    append_log, draw_logs, format_event, prompt_input, BackgroundAdapter, BackgroundRequest,
+    RatatuiAdapter,
 };
 
 const MENU_ITEMS: &[MenuAction] = &[
@@ -56,6 +56,7 @@ const CLEAN_ITEMS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Projects,
+    Devices,
     Actions,
     Menu,
 }
@@ -124,22 +125,30 @@ struct AppState {
     logs: VecDeque<String>,
     focus: Focus,
     project_selected: usize,
+    device_selected: usize,
     action_selected: usize,
     menu_selected: usize,
+    devices: Vec<Device>,
+    device_error: Option<String>,
 }
 
 impl AppState {
     fn new() -> Self {
-        Self {
+        let mut app = Self {
             logs: VecDeque::from([
                 "projects are now the primary view".to_string(),
-                "use Tab or ←/→ to switch panels, Enter to open project actions".to_string(),
+                "left dock keeps devices visible; Enter refreshes, a aliases".to_string(),
             ]),
             focus: Focus::Projects,
             project_selected: 0,
+            device_selected: 0,
             action_selected: 0,
             menu_selected: 0,
-        }
+            devices: Vec::new(),
+            device_error: None,
+        };
+        refresh_device_panel(&mut app, false);
+        app
     }
 
     fn clamp(&mut self, config: &Config) {
@@ -162,6 +171,12 @@ impl AppState {
             self.action_selected = action_count - 1;
         }
 
+        if self.devices.is_empty() {
+            self.device_selected = 0;
+        } else if self.device_selected >= self.devices.len() {
+            self.device_selected = self.devices.len() - 1;
+        }
+
         if self.menu_selected >= MENU_ITEMS.len() {
             self.menu_selected = MENU_ITEMS.len().saturating_sub(1);
         }
@@ -170,7 +185,8 @@ impl AppState {
     fn move_focus_next(&mut self, config: &Config) {
         self.clamp(config);
         self.focus = match self.focus {
-            Focus::Projects => {
+            Focus::Projects => Focus::Devices,
+            Focus::Devices => {
                 if config.projects.is_empty() {
                     Focus::Menu
                 } else {
@@ -186,14 +202,38 @@ impl AppState {
         self.clamp(config);
         self.focus = match self.focus {
             Focus::Projects => Focus::Menu,
-            Focus::Actions => Focus::Projects,
+            Focus::Devices => Focus::Projects,
+            Focus::Actions => Focus::Devices,
             Focus::Menu => {
                 if config.projects.is_empty() {
-                    Focus::Projects
+                    Focus::Devices
                 } else {
                     Focus::Actions
                 }
             }
+        };
+    }
+
+    fn move_focus_right(&mut self, config: &Config) {
+        self.clamp(config);
+        self.focus = match self.focus {
+            Focus::Projects | Focus::Devices => {
+                if config.projects.is_empty() {
+                    Focus::Menu
+                } else {
+                    Focus::Actions
+                }
+            }
+            Focus::Actions => Focus::Menu,
+            Focus::Menu => Focus::Menu,
+        };
+    }
+
+    fn move_focus_left(&mut self, _config: &Config) {
+        self.focus = match self.focus {
+            Focus::Projects | Focus::Devices => Focus::Projects,
+            Focus::Actions => Focus::Projects,
+            Focus::Menu => Focus::Actions,
         };
     }
 }
@@ -235,12 +275,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result
         {
             match key.code {
                 KeyCode::Char('q') => return Ok(()),
-                KeyCode::Tab | KeyCode::Right => app.move_focus_next(&config),
-                KeyCode::BackTab | KeyCode::Left => app.move_focus_prev(&config),
+                KeyCode::Tab => app.move_focus_next(&config),
+                KeyCode::BackTab => app.move_focus_prev(&config),
+                KeyCode::Right => app.move_focus_right(&config),
+                KeyCode::Left => app.move_focus_left(&config),
                 KeyCode::Char('m') => app.focus = Focus::Menu,
                 KeyCode::Esc => app.focus = Focus::Projects,
                 KeyCode::Up | KeyCode::Char('k') => move_selection_up(&mut app),
                 KeyCode::Down | KeyCode::Char('j') => move_selection_down(&mut app, &config),
+                KeyCode::Char('a') if app.focus == Focus::Devices => {
+                    alias_selected_device(terminal, &mut config, &mut app)?;
+                }
                 KeyCode::Enter => {
                     if handle_enter(terminal, &mut config, &mut app)? {
                         return Ok(());
@@ -257,6 +302,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result
 fn move_selection_up(app: &mut AppState) {
     match app.focus {
         Focus::Projects => app.project_selected = app.project_selected.saturating_sub(1),
+        Focus::Devices => {
+            if app.device_selected == 0 {
+                app.focus = Focus::Projects;
+            } else {
+                app.device_selected = app.device_selected.saturating_sub(1);
+            }
+        }
         Focus::Actions => app.action_selected = app.action_selected.saturating_sub(1),
         Focus::Menu => app.menu_selected = app.menu_selected.saturating_sub(1),
     }
@@ -267,6 +319,13 @@ fn move_selection_down(app: &mut AppState, config: &Config) {
         Focus::Projects => {
             if app.project_selected + 1 < config.projects.len() {
                 app.project_selected += 1;
+            } else {
+                app.focus = Focus::Devices;
+            }
+        }
+        Focus::Devices => {
+            if app.device_selected + 1 < app.devices.len() {
+                app.device_selected += 1;
             }
         }
         Focus::Actions => {
@@ -296,8 +355,12 @@ fn handle_enter(
                 app.action_selected = 0;
                 app.focus = Focus::Actions;
             } else {
-                app.focus = Focus::Menu;
+                app.focus = Focus::Devices;
             }
+            Ok(false)
+        }
+        Focus::Devices => {
+            refresh_device_panel(app, true);
             Ok(false)
         }
         Focus::Actions => {
@@ -332,7 +395,14 @@ fn handle_project_action(
                 "Run app",
                 format!("starting '{}'...", project_name),
                 move |config, adapter| {
-                    actions::run(config, Some(task_project.as_str()), None, None, false, adapter)
+                    actions::run(
+                        config,
+                        Some(task_project.as_str()),
+                        None,
+                        None,
+                        false,
+                        adapter,
+                    )
                 },
             )?;
             append_log(
@@ -516,7 +586,14 @@ where
     T: Send + 'static,
     F: FnOnce(&mut Config, &mut BackgroundAdapter) -> Result<T> + Send + 'static,
 {
-    run_progress_task_for_logs(terminal, config, &mut app.logs, title, initial_status, action)
+    run_progress_task_for_logs(
+        terminal,
+        config,
+        &mut app.logs,
+        title,
+        initial_status,
+        action,
+    )
 }
 
 fn run_progress_task_for_logs<T, F>(
@@ -565,16 +642,17 @@ where
                     response_tx,
                 } => {
                     status = format!("waiting for input: {}", prompt);
-                    let selection =
-                        match adapters::choose_from_list(terminal, logs, &prompt, &items, default) {
-                            Ok(selection) => selection,
-                            Err(TossError::UserCancelled(_)) => None,
-                            Err(err) => {
-                                let _ = response_tx.send(None);
-                                let _ = worker.join();
-                                return Err(err);
-                            }
-                        };
+                    let selection = match adapters::choose_from_list(
+                        terminal, logs, &prompt, &items, default,
+                    ) {
+                        Ok(selection) => selection,
+                        Err(TossError::UserCancelled(_)) => None,
+                        Err(err) => {
+                            let _ = response_tx.send(None);
+                            let _ = worker.join();
+                            return Err(err);
+                        }
+                    };
                     let _ = response_tx.send(selection);
                 }
             }
@@ -600,7 +678,8 @@ where
             }
         }
 
-        if event::poll(Duration::from_millis(120)).map_err(|e| TossError::Io(io::Error::other(e)))?
+        if event::poll(Duration::from_millis(120))
+            .map_err(|e| TossError::Io(io::Error::other(e)))?
         {
             let _ = event::read().map_err(|e| TossError::Io(io::Error::other(e)))?;
         }
@@ -676,6 +755,35 @@ fn log_devices(logs: &mut VecDeque<String>, config: &Config) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn alias_selected_device(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    config: &mut Config,
+    app: &mut AppState,
+) -> Result<()> {
+    let Some(device) = app.devices.get(app.device_selected) else {
+        append_log(&mut app.logs, "no device selected");
+        return Ok(());
+    };
+
+    let Some(name) = prompt_input(terminal, &mut app.logs, "Alias name", "", false)? else {
+        return Ok(());
+    };
+
+    let aliased = device::alias_device(config, &app.devices, &device.identifier, &name)?;
+    append_log(
+        &mut app.logs,
+        format!(
+            "aliased '{}' -> {} ({})",
+            aliased.alias, aliased.device_name, aliased.udid
+        ),
+    );
+    if aliased.is_default {
+        append_log(&mut app.logs, "default device set automatically");
+    }
+    refresh_device_panel(app, false);
     Ok(())
 }
 
@@ -1172,9 +1280,9 @@ fn draw_home(frame: &mut Frame<'_>, config: &Config, app: &AppState) {
     let content = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(41),
-            Constraint::Percentage(25),
+            Constraint::Percentage(33),
+            Constraint::Percentage(45),
+            Constraint::Percentage(22),
         ])
         .split(chunks[1]);
 
@@ -1182,10 +1290,16 @@ fn draw_home(frame: &mut Frame<'_>, config: &Config, app: &AppState) {
     draw_project_detail_panel(frame, content[1], config, app);
     draw_menu_panel(frame, content[2], app);
 
-    draw_logs(frame, chunks[2], &app.logs);
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(34), Constraint::Min(20)])
+        .split(chunks[2]);
+
+    draw_devices_panel(frame, bottom[0], config, app);
+    draw_logs(frame, bottom[1], &app.logs);
 
     let footer = Paragraph::new(
-        "Tab/←/→ switch  ↑/↓ move  Enter open/select  Esc back to projects  m menu  q quit",
+        "Tab cycle  ←/→ columns  ↑/↓ move  Enter select/refresh  a alias  m menu  q quit",
     )
     .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(footer, chunks[3]);
@@ -1241,7 +1355,10 @@ fn draw_progress_overlay(
         Line::from(""),
         Line::from(status.to_string()),
         Line::from(""),
-        Line::from(indeterminate_bar(inner.width.saturating_sub(2) as usize, tick)),
+        Line::from(indeterminate_bar(
+            inner.width.saturating_sub(2) as usize,
+            tick,
+        )),
         Line::from(""),
         Line::from("Keyboard input is temporarily disabled."),
     ];
@@ -1260,12 +1377,7 @@ fn draw_projects_panel(frame: &mut Frame<'_>, area: Rect, config: &Config, app: 
             Line::from("Use the Menu panel to add one."),
         ])
         .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title("Projects")
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
+        .block(panel_block("Projects", app.focus == Focus::Projects).border_style(border_style));
         frame.render_widget(empty, area);
         return;
     }
@@ -1300,10 +1412,11 @@ fn draw_projects_panel(frame: &mut Frame<'_>, area: Rect, config: &Config, app: 
 
     let list = List::new(list_items)
         .block(
-            Block::default()
-                .title(format!("Projects ({})", config.projects.len()))
-                .borders(Borders::ALL)
-                .border_style(border_style),
+            panel_block(
+                format!("Projects {}", config.projects.len()),
+                app.focus == Focus::Projects,
+            )
+            .border_style(border_style),
         )
         .highlight_style(selected_style(app.focus == Focus::Projects))
         .highlight_symbol("▌ ");
@@ -1312,13 +1425,103 @@ fn draw_projects_panel(frame: &mut Frame<'_>, area: Rect, config: &Config, app: 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn draw_devices_panel(frame: &mut Frame<'_>, area: Rect, config: &Config, app: &AppState) {
+    let border_style = panel_border_style(app.focus == Focus::Devices);
+    let title = format!("Devices {}", device_summary(&app.devices));
+
+    if app.devices.is_empty() {
+        let mut lines = vec![
+            Line::from("○ no devices"),
+            Line::from(""),
+            Line::from("↻ refresh"),
+            Line::from("a alias"),
+        ];
+        if let Some(error) = &app.device_error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                error.as_str(),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        let empty = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel_block(title, app.focus == Focus::Devices).border_style(border_style));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let alias_map: HashMap<&str, &str> = config
+        .devices
+        .aliases
+        .iter()
+        .map(|(name, udid)| (udid.as_str(), name.as_str()))
+        .collect();
+
+    let items: Vec<ListItem<'_>> = app
+        .devices
+        .iter()
+        .map(|device| {
+            let state_symbol = device_state_symbol(&device.state);
+            let state_style = device_state_style(&device.state);
+            let mut line = vec![
+                Span::styled(format!("{} ", state_symbol), state_style),
+                Span::styled(
+                    device.name.as_str(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if is_default_device(config, device) {
+                line.push(Span::styled(" ★", Style::default().fg(Color::Yellow)));
+            }
+
+            let alias = alias_map
+                .get(device.udid.as_str())
+                .map(|alias| format!(" @{}", alias))
+                .unwrap_or_default();
+            line.push(Span::styled(
+                format!("  {} · iOS {}{}", device.model, device.os_version, alias),
+                Style::default().fg(Color::Gray),
+            ));
+
+            ListItem::new(Line::from(line))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(panel_block(title, app.focus == Focus::Devices).border_style(border_style))
+        .highlight_style(selected_style(app.focus == Focus::Devices))
+        .highlight_symbol("▌ ");
+    let mut state = ListState::default();
+    state.select(Some(app.device_selected));
+    frame.render_stateful_widget(list, area, &mut state);
+
+    let inner = area.inner(ratatui::layout::Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
+    let hint_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+    let hint_area = Rect {
+        x: inner.x,
+        y: hint_y,
+        width: inner.width,
+        height: 1,
+    };
+    let hint_style = if app.device_error.is_some() {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let hint_text = app
+        .device_error
+        .as_deref()
+        .unwrap_or("↻ Enter refresh  a alias");
+    frame.render_widget(Paragraph::new(hint_text).style(hint_style), hint_area);
+}
+
 fn draw_project_detail_panel(frame: &mut Frame<'_>, area: Rect, config: &Config, app: &AppState) {
     let Some((project_name, project)) = selected_project(config, app.project_selected) else {
-        let empty = Paragraph::new("Select a project after adding one.").block(
-            Block::default()
-                .title("Project Detail")
-                .borders(Borders::ALL),
-        );
+        let empty = Paragraph::new("Select a project after adding one.")
+            .block(panel_block("Project Detail", false));
         frame.render_widget(empty, area);
         return;
     };
@@ -1328,17 +1531,48 @@ fn draw_project_detail_panel(frame: &mut Frame<'_>, area: Rect, config: &Config,
         .constraints([Constraint::Min(10), Constraint::Length(9)])
         .split(area);
 
-    let details = project_detail_lines(config, project_name, project);
-    let detail_text: Vec<Line<'_>> = details.into_iter().map(Line::from).collect();
-    let detail = Paragraph::new(detail_text)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title(format!("{} Detail", project_name))
-                .borders(Borders::ALL)
-                .border_style(panel_border_style(app.focus == Focus::Projects)),
-        );
-    frame.render_widget(detail, chunks[0]);
+    let detail_block = panel_block(format!("{} Detail", project_name), false)
+        .border_style(panel_border_style(false));
+    let detail_inner = detail_block.inner(chunks[0]);
+    frame.render_widget(detail_block, chunks[0]);
+
+    let detail_grid = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(detail_inner);
+    let detail_top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(detail_grid[0]);
+    let detail_bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(detail_grid[1]);
+
+    draw_detail_section(
+        frame,
+        detail_top[0],
+        "Identity",
+        &project_identity_lines(config, project_name, project),
+    );
+    draw_detail_section(
+        frame,
+        detail_top[1],
+        "Source",
+        &project_source_lines(project),
+    );
+    draw_detail_section(
+        frame,
+        detail_bottom[0],
+        "Artifact",
+        &project_artifact_lines(project),
+    );
+    draw_detail_section(
+        frame,
+        detail_bottom[1],
+        "Recent",
+        &project_recent_lines(config, project_name, project),
+    );
 
     let actions = project_actions(project);
     let action_items: Vec<ListItem<'_>> = actions
@@ -1347,9 +1581,7 @@ fn draw_project_detail_panel(frame: &mut Frame<'_>, area: Rect, config: &Config,
         .collect();
     let actions_list = List::new(action_items)
         .block(
-            Block::default()
-                .title("Project Actions")
-                .borders(Borders::ALL)
+            panel_block("Project Actions", app.focus == Focus::Actions)
                 .border_style(panel_border_style(app.focus == Focus::Actions)),
         )
         .highlight_style(selected_style(app.focus == Focus::Actions))
@@ -1362,7 +1594,7 @@ fn draw_project_detail_panel(frame: &mut Frame<'_>, area: Rect, config: &Config,
 fn draw_menu_panel(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(6)])
+        .constraints([Constraint::Min(10), Constraint::Length(5)])
         .split(area);
 
     let menu_items: Vec<ListItem<'_>> = MENU_ITEMS
@@ -1371,9 +1603,7 @@ fn draw_menu_panel(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         .collect();
     let list = List::new(menu_items)
         .block(
-            Block::default()
-                .title("Menu")
-                .borders(Borders::ALL)
+            panel_block("Tools", app.focus == Focus::Menu)
                 .border_style(panel_border_style(app.focus == Focus::Menu)),
         )
         .highlight_style(selected_style(app.focus == Focus::Menu))
@@ -1384,8 +1614,125 @@ fn draw_menu_panel(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
     let helper = Paragraph::new(MENU_ITEMS[app.menu_selected].description())
         .wrap(Wrap { trim: false })
-        .block(Block::default().title("Hint").borders(Borders::ALL));
+        .block(panel_block("Hint", false));
     frame.render_widget(helper, chunks[1]);
+}
+
+fn panel_block(title: impl Into<String>, active: bool) -> Block<'static> {
+    let title = title.into();
+    let title_style = if active {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    };
+    let prefix = if active { "● " } else { "· " };
+    Block::default()
+        .title(Line::from(vec![
+            Span::styled(prefix, title_style),
+            Span::styled(title, title_style),
+        ]))
+        .borders(Borders::ALL)
+}
+
+fn draw_detail_section(frame: &mut Frame<'_>, area: Rect, title: &str, lines: &[String]) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let text: Vec<Line<'_>> = lines
+        .iter()
+        .take(visible.max(1))
+        .map(|line| Line::from(line.as_str()))
+        .collect();
+    let paragraph = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .block(panel_block(title, false));
+    frame.render_widget(paragraph, area);
+}
+
+fn refresh_device_panel(app: &mut AppState, emit_log: bool) {
+    match xcrun::list_devices() {
+        Ok(devices) => {
+            let summary = device_summary(&devices);
+            app.devices = devices;
+            app.device_error = None;
+            if app.devices.is_empty() {
+                app.device_selected = 0;
+            } else if app.device_selected >= app.devices.len() {
+                app.device_selected = app.devices.len() - 1;
+            }
+            if emit_log {
+                append_log(&mut app.logs, format!("devices refreshed: {}", summary));
+            }
+        }
+        Err(err) => {
+            app.device_error = Some("! refresh failed".to_string());
+            if emit_log {
+                append_log(&mut app.logs, format!("device refresh failed: {}", err));
+            }
+        }
+    }
+}
+
+fn device_summary(devices: &[Device]) -> String {
+    let mut connected = 0usize;
+    let mut paired = 0usize;
+    let mut disconnected = 0usize;
+    let mut unknown = 0usize;
+
+    for device in devices {
+        match device.state {
+            DeviceState::Connected => connected += 1,
+            DeviceState::Paired => paired += 1,
+            DeviceState::Disconnected => disconnected += 1,
+            DeviceState::Unknown(_) => unknown += 1,
+        }
+    }
+
+    let mut parts = vec![format!("●{}", connected)];
+    if paired > 0 {
+        parts.push(format!("◐{}", paired));
+    }
+    if disconnected > 0 {
+        parts.push(format!("○{}", disconnected));
+    }
+    if unknown > 0 {
+        parts.push(format!("?{}", unknown));
+    }
+    parts.join(" ")
+}
+
+fn device_state_symbol(state: &DeviceState) -> char {
+    match state {
+        DeviceState::Connected => '●',
+        DeviceState::Paired => '◐',
+        DeviceState::Disconnected => '○',
+        DeviceState::Unknown(_) => '?',
+    }
+}
+
+fn device_state_style(state: &DeviceState) -> Style {
+    match state {
+        DeviceState::Connected => Style::default().fg(Color::Green),
+        DeviceState::Paired => Style::default().fg(Color::Yellow),
+        DeviceState::Disconnected => Style::default().fg(Color::DarkGray),
+        DeviceState::Unknown(_) => Style::default().fg(Color::Magenta),
+    }
+}
+
+fn is_default_device(config: &Config, device: &Device) -> bool {
+    let Some(default_device) = config.defaults.device.as_deref() else {
+        return false;
+    };
+
+    default_device == device.identifier
+        || default_device == device.udid
+        || config
+            .devices
+            .aliases
+            .get(default_device)
+            .is_some_and(|udid| udid == &device.udid)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1417,7 +1764,11 @@ fn indeterminate_bar(width: usize, tick: usize) -> String {
     } else {
         let cycle = travel * 2;
         let step = tick % cycle.max(1);
-        if step <= travel { step } else { cycle - step }
+        if step <= travel {
+            step
+        } else {
+            cycle - step
+        }
     };
 
     let mut bar = String::with_capacity(width + 2);
@@ -1433,53 +1784,126 @@ fn indeterminate_bar(width: usize, tick: usize) -> String {
     bar
 }
 
-fn project_detail_lines(
+fn project_identity_lines(
     config: &Config,
     project_name: &str,
     project: &ProjectConfig,
 ) -> Vec<String> {
     let mut lines = vec![
         format!(
-            "kind: {}",
+            "kind  {}",
             match project.kind {
                 ProjectKind::Xcode => "xcode/app",
                 ProjectKind::Ipa => "ipa",
             }
         ),
         format!(
-            "default: {}",
+            "default  {}",
             if config.defaults.project.as_deref() == Some(project_name) {
-                "yes"
+                "★ yes"
             } else {
-                "no"
+                "· no"
             }
-        ),
-        format!(
-            "last tossed: {}",
-            format_last_tossed(project.last_tossed_at.as_deref())
         ),
     ];
 
     if let Some(bundle_id) = &project.bundle_id {
-        lines.push(format!("bundle id: {}", bundle_id));
+        lines.push(format!("bundle  {}", bundle_id));
+    } else {
+        lines.push("bundle  <missing>".into());
     }
+
+    if let Some(app_name) = &project.app_name {
+        lines.push(format!("app     {}", app_name));
+    }
+
+    lines
+}
+
+fn project_source_lines(project: &ProjectConfig) -> Vec<String> {
+    match project.kind {
+        ProjectKind::Xcode => {
+            let mut lines = vec![format!("build   {}", project.build_dir)];
+            if let Some(path) = &project.path {
+                lines.push(format!("source  {}", path));
+            } else {
+                lines.push("source  <unset>".into());
+            }
+            lines
+        }
+        ProjectKind::Ipa => {
+            let mut lines = Vec::new();
+            if let Some(path) = &project.ipa_path {
+                lines.push(format!("cache   {}", path));
+            } else {
+                lines.push("cache   <unset>".into());
+            }
+            if let Some(name) = &project.original_name {
+                lines.push(format!("file    {}", name));
+            } else {
+                lines.push("file    <unknown>".into());
+            }
+            lines
+        }
+    }
+}
+
+fn project_artifact_lines(project: &ProjectConfig) -> Vec<String> {
+    match project.kind {
+        ProjectKind::Xcode => vec![
+            "mode    live build".into(),
+            format!("dir     {}", project.build_dir),
+            project
+                .path
+                .as_ref()
+                .map(|path| format!("sync    {}", path))
+                .unwrap_or_else(|| "sync    <unset>".into()),
+        ],
+        ProjectKind::Ipa => vec![
+            "mode    cached ipa".into(),
+            project
+                .ipa_path
+                .as_ref()
+                .map(|path| format!("asset   {}", path))
+                .unwrap_or_else(|| "asset   <unset>".into()),
+            project
+                .original_name
+                .as_ref()
+                .map(|name| format!("name    {}", name))
+                .unwrap_or_else(|| "name    <unknown>".into()),
+        ],
+    }
+}
+
+fn project_recent_lines(
+    config: &Config,
+    project_name: &str,
+    project: &ProjectConfig,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "tossed  {}",
+            format_last_tossed(project.last_tossed_at.as_deref())
+        ),
+        format!(
+            "role    {}",
+            if config.defaults.project.as_deref() == Some(project_name) {
+                "default"
+            } else {
+                "secondary"
+            }
+        ),
+    ];
 
     match project.kind {
         ProjectKind::Xcode => {
-            lines.push(format!("build dir: {}", project.build_dir));
-            if let Some(path) = &project.path {
-                lines.push(format!("source dir: {}", path));
-            }
             if let Some(app_name) = &project.app_name {
-                lines.push(format!("app name: {}", app_name));
+                lines.push(format!("target  {}", app_name));
             }
         }
         ProjectKind::Ipa => {
-            if let Some(path) = &project.ipa_path {
-                lines.push(format!("cached ipa: {}", path));
-            }
             if let Some(name) = &project.original_name {
-                lines.push(format!("original file: {}", name));
+                lines.push(format!("origin  {}", name));
             }
         }
     }
