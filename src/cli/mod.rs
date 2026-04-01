@@ -6,6 +6,7 @@ pub mod config;
 pub mod devices;
 pub mod doctor;
 pub mod projects;
+pub mod signing;
 pub mod state;
 
 use clap::{Parser, Subcommand};
@@ -37,6 +38,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Inspect local signing identities, profiles, and teams
+    Signing {
+        #[command(subcommand)]
+        action: SigningAction,
+    },
     /// Show all local toss state and signing cache
     State,
     /// Inspect local toss/Xcode/Rust files and optionally remove selected categories
@@ -65,6 +71,9 @@ pub enum Commands {
         /// Show full xcodebuild output
         #[arg(short, long)]
         verbose: bool,
+        /// Print the planned work without building, signing, or installing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Launch an app on a device
     Launch {
@@ -87,6 +96,9 @@ pub enum Commands {
         /// Show full xcodebuild output
         #[arg(short, long)]
         verbose: bool,
+        /// Print the planned work without building, signing, installing, or launching
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Resign an IPA and deploy to device
     Sign {
@@ -104,6 +116,9 @@ pub enum Commands {
         /// Path to .mobileprovision file
         #[arg(long)]
         profile: Option<String>,
+        /// Print the planned signing steps without modifying the IPA or installing it
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -172,6 +187,24 @@ pub enum ConfigAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum SigningAction {
+    /// List codesigning identities available in the keychain
+    Identities,
+    /// List provisioning profiles discovered from local Xcode caches
+    Profiles,
+    /// Summarize team IDs seen in config, identities, and profiles
+    Teams,
+    /// Diagnose signing readiness for an IPA project
+    Doctor {
+        /// IPA project alias (uses default IPA project if omitted)
+        project: Option<String>,
+        /// Device alias, UDID, or index
+        #[arg(short, long)]
+        device: Option<String>,
+    },
+}
+
 pub fn dispatch(command: Commands) -> Result<()> {
     let mut config = Config::load()?;
 
@@ -203,6 +236,14 @@ pub fn dispatch(command: Commands) -> Result<()> {
             }
             ConfigAction::SetTeamId { team_id } => config::set_team_id(&mut config, &team_id),
         },
+        Commands::Signing { action } => match action {
+            SigningAction::Identities => signing::identities(),
+            SigningAction::Profiles => signing::profiles(&config),
+            SigningAction::Teams => signing::teams(&config),
+            SigningAction::Doctor { project, device } => {
+                signing::doctor(&config, project.as_deref(), device.as_deref())
+            }
+        },
         Commands::State => state::show(&config),
         Commands::Clean { delete, all_safe } => {
             let cwd = std::env::current_dir()?;
@@ -215,12 +256,14 @@ pub fn dispatch(command: Commands) -> Result<()> {
             device,
             prebuilt,
             verbose,
+            dry_run,
         } => actions::install(
             &mut config,
             project.as_deref(),
             device.as_deref(),
             prebuilt,
             verbose,
+            dry_run,
         ),
         Commands::Launch { project, device } => {
             actions::launch(&config, project.as_deref(), device.as_deref())
@@ -230,12 +273,14 @@ pub fn dispatch(command: Commands) -> Result<()> {
             device,
             prebuilt,
             verbose,
+            dry_run,
         } => actions::run(
             &mut config,
             project.as_deref(),
             device.as_deref(),
             prebuilt,
             verbose,
+            dry_run,
         ),
         Commands::Sign {
             ipa,
@@ -243,6 +288,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             launch,
             identity,
             profile,
+            dry_run,
         } => actions::sign(
             &config,
             &ipa,
@@ -250,6 +296,7 @@ pub fn dispatch(command: Commands) -> Result<()> {
             identity.as_deref(),
             profile.as_deref(),
             launch,
+            dry_run,
         ),
     }
 }

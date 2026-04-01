@@ -78,6 +78,25 @@ pub struct SignOutcome {
     pub launched: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SigningTargetPreview {
+    pub kind: String,
+    pub original_bundle_id: String,
+    pub final_bundle_id: String,
+    pub selected_profile_name: Option<String>,
+    pub selected_profile_team_ids: Vec<String>,
+    pub requires_auto_provisioning: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SigningPreview {
+    pub app_name: String,
+    pub extracted_bundle_id: String,
+    pub selected_identity_name: String,
+    pub config_team_id: Option<String>,
+    pub targets: Vec<SigningTargetPreview>,
+}
+
 pub fn unzip_ipa(ipa_path: &Path) -> Result<ExtractedApp> {
     if !ipa_path.exists() {
         return Err(TossError::Signing(format!(
@@ -229,6 +248,73 @@ pub fn select_signing_identity(
             Ok(identities[selection].clone())
         }
     }
+}
+
+fn select_signing_identity_for_bundle(
+    config: &Config,
+    identities: &[SigningIdentity],
+    profiles: &[ProvisioningProfile],
+    bundle_id: &str,
+    device_udid: &str,
+    override_name: Option<&str>,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<SigningIdentity> {
+    if override_name.is_some() {
+        return select_signing_identity(identities, override_name, adapter);
+    }
+
+    let preferred_team = profiles
+        .iter()
+        .find(|profile| {
+            profile_matches_bundle_id(profile, bundle_id)
+                && profile.expiration_epoch.is_none_or(|epoch| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0);
+                    epoch > now
+                })
+                && (profile.provisions_all_devices
+                    || profile.provisioned_devices.is_empty()
+                    || profile
+                        .provisioned_devices
+                        .iter()
+                        .any(|udid| udid == device_udid))
+        })
+        .and_then(|profile| profile.team_ids.first().cloned())
+        .or_else(|| config.signing.team_id.clone());
+
+    if let Some(team_id) = preferred_team {
+        let matching: Vec<_> = identities
+            .iter()
+            .filter(|identity| {
+                identity.name.contains(&format!("({})", team_id)) || identity.name.contains(&team_id)
+            })
+            .cloned()
+            .collect();
+
+        return match matching.len() {
+            0 => Err(TossError::Signing(format!(
+                "no signing identity matches team '{}' — update `toss config set-team-id`, unlock the correct keychain identity, or pass `--identity`",
+                team_id
+            ))),
+            1 => Ok(matching[0].clone()),
+            _ => {
+                let items: Vec<&str> = matching.iter().map(|id| id.name.as_str()).collect();
+                let selection = choose_index(
+                    adapter,
+                    "Select signing identity",
+                    &items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+                    TossError::Signing(
+                        "multiple signing identities match — specify one with `--identity`".into(),
+                    ),
+                )?;
+                Ok(matching[selection].clone())
+            }
+        };
+    }
+
+    select_signing_identity(identities, None, adapter)
 }
 
 pub fn find_provisioning_profiles() -> Result<Vec<ProvisioningProfile>> {
@@ -443,7 +529,7 @@ fn profile_matches_bundle_id(profile: &ProvisioningProfile, bundle_id: &str) -> 
 
 fn profile_compatibility_issues(
     profile: &ProvisioningProfile,
-    _identity: &SigningIdentity,
+    identity: &SigningIdentity,
     bundle_id: &str,
     device_udid: &str,
 ) -> Vec<String> {
@@ -476,6 +562,18 @@ fn profile_compatibility_issues(
         issues.push(format!("profile does not include device {}", device_udid));
     }
 
+    if !identity_matches_profile(identity, profile) {
+        let teams = if profile.team_ids.is_empty() {
+            "unknown".to_string()
+        } else {
+            profile.team_ids.join(", ")
+        };
+        issues.push(format!(
+            "identity '{}' does not match profile team(s) {}",
+            identity.name, teams
+        ));
+    }
+
     issues
 }
 
@@ -490,7 +588,6 @@ fn match_compatible_profile(
         .iter()
         .filter(|p| p.bundle_id_pattern == bundle_id)
         .filter(|p| profile_compatibility_issues(p, identity, bundle_id, device_udid).is_empty())
-        .filter(|p| identity_matches_profile(identity, p))
         .collect();
 
     if exact.len() == 1 {
@@ -501,7 +598,6 @@ fn match_compatible_profile(
         .iter()
         .filter(|p| profile_matches_bundle_id(p, bundle_id))
         .filter(|p| profile_compatibility_issues(p, identity, bundle_id, device_udid).is_empty())
-        .filter(|p| identity_matches_profile(identity, p))
         .collect();
 
     let candidates = if !exact.is_empty() { &exact } else { &wildcard };
@@ -1168,6 +1264,210 @@ fn resolve_signing_plan(
     })
 }
 
+struct PreviewAdapter;
+
+impl WorkflowAdapter for PreviewAdapter {
+    fn choose(
+        &mut self,
+        _prompt: &str,
+        _items: &[String],
+        default: usize,
+    ) -> Result<Option<usize>> {
+        Ok(Some(default))
+    }
+}
+
+pub fn preview_signing_plan(
+    config: &Config,
+    ipa_path: &Path,
+    device_udid: &str,
+    identity_override: Option<&str>,
+    profile_override: Option<&str>,
+) -> Result<SigningPreview> {
+    let extracted = unzip_ipa(ipa_path)?;
+    let extracted_bundle_id = extract_bundle_id(&extracted.app_path)?;
+    let identities = list_signing_identities()?;
+    let available_profiles = find_provisioning_profiles().unwrap_or_default();
+    let mut adapter = PreviewAdapter;
+    let identity = select_signing_identity_for_bundle(
+        config,
+        &identities,
+        &available_profiles,
+        &extracted_bundle_id,
+        device_udid,
+        identity_override,
+        &mut adapter,
+    )?;
+
+    let discovered = scan_signing_targets(&extracted.app_path)?;
+    let override_path = profile_override.map(Path::new);
+    let (main_path, _main_kind, main_original_bundle_id) = discovered
+        .first()
+        .cloned()
+        .ok_or_else(|| TossError::Signing("no app bundle discovered after extraction".into()))?;
+
+    let main_preferred_bundle_id = if match_compatible_profile(
+        &available_profiles,
+        &main_original_bundle_id,
+        &identity,
+        device_udid,
+        &mut adapter,
+    )?
+    .is_some()
+        || override_path.is_some()
+    {
+        main_original_bundle_id.clone()
+    } else {
+        generate_temp_bundle_id(config, &main_path, &main_original_bundle_id)?
+    };
+
+    let mut previews = Vec::new();
+    let main_preview = preview_signing_target(
+        config,
+        &available_profiles,
+        &identity,
+        device_udid,
+        &main_path,
+        BundleKind::App,
+        &main_original_bundle_id,
+        &main_preferred_bundle_id,
+        override_path,
+        &mut adapter,
+    )?;
+    let main_final_bundle_id = main_preview.final_bundle_id.clone();
+    previews.push(main_preview);
+
+    for (path, kind, original_bundle_id) in discovered.into_iter().skip(1) {
+        let preferred_bundle_id = if match_compatible_profile(
+            &available_profiles,
+            &original_bundle_id,
+            &identity,
+            device_udid,
+            &mut adapter,
+        )?
+        .is_some()
+        {
+            original_bundle_id.clone()
+        } else {
+            derive_extension_bundle_id(
+                &main_original_bundle_id,
+                &main_final_bundle_id,
+                &original_bundle_id,
+                &path,
+                config,
+            )?
+        };
+
+        previews.push(preview_signing_target(
+            config,
+            &available_profiles,
+            &identity,
+            device_udid,
+            &path,
+            kind,
+            &original_bundle_id,
+            &preferred_bundle_id,
+            None,
+            &mut adapter,
+        )?);
+    }
+
+    Ok(SigningPreview {
+        app_name: extracted
+            .app_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        extracted_bundle_id,
+        selected_identity_name: identity.name,
+        config_team_id: config.signing.team_id.clone(),
+        targets: previews,
+    })
+}
+
+fn preview_signing_target(
+    config: &Config,
+    available_profiles: &[ProvisioningProfile],
+    identity: &SigningIdentity,
+    device_udid: &str,
+    bundle_path: &Path,
+    kind: BundleKind,
+    original_bundle_id: &str,
+    preferred_bundle_id: &str,
+    profile_override: Option<&Path>,
+    adapter: &mut impl WorkflowAdapter,
+) -> Result<SigningTargetPreview> {
+    if let Some(path) = profile_override {
+        let profile = load_profile_from_path(path)?;
+        let issues =
+            profile_compatibility_issues(&profile, identity, original_bundle_id, device_udid);
+        if !issues.is_empty() {
+            return Err(TossError::Signing(format!(
+                "override profile '{}' is incompatible with {} '{}': {}",
+                path.display(),
+                kind.display_name(),
+                original_bundle_id,
+                issues.join("; ")
+            )));
+        }
+        return Ok(SigningTargetPreview {
+            kind: kind.display_name().to_string(),
+            original_bundle_id: original_bundle_id.to_string(),
+            final_bundle_id: original_bundle_id.to_string(),
+            selected_profile_name: Some(profile.name),
+            selected_profile_team_ids: profile.team_ids,
+            requires_auto_provisioning: false,
+        });
+    }
+
+    if let Some(profile) = match_compatible_profile(
+        available_profiles,
+        original_bundle_id,
+        identity,
+        device_udid,
+        adapter,
+    )? {
+        return Ok(SigningTargetPreview {
+            kind: kind.display_name().to_string(),
+            original_bundle_id: original_bundle_id.to_string(),
+            final_bundle_id: original_bundle_id.to_string(),
+            selected_profile_name: Some(profile.name),
+            selected_profile_team_ids: profile.team_ids,
+            requires_auto_provisioning: false,
+        });
+    }
+
+    let final_bundle_id = preferred_bundle_id.to_string();
+    if let Some(profile) = match_compatible_profile(
+        available_profiles,
+        &final_bundle_id,
+        identity,
+        device_udid,
+        adapter,
+    )? {
+        return Ok(SigningTargetPreview {
+            kind: kind.display_name().to_string(),
+            original_bundle_id: original_bundle_id.to_string(),
+            final_bundle_id,
+            selected_profile_name: Some(profile.name),
+            selected_profile_team_ids: profile.team_ids,
+            requires_auto_provisioning: false,
+        });
+    }
+
+    let _ = temp_team_id(config)?;
+    let _ = bundle_path;
+    Ok(SigningTargetPreview {
+        kind: kind.display_name().to_string(),
+        original_bundle_id: original_bundle_id.to_string(),
+        final_bundle_id,
+        selected_profile_name: None,
+        selected_profile_team_ids: Vec::new(),
+        requires_auto_provisioning: true,
+    })
+}
+
 fn extract_profile_entitlements(
     profile_path: &Path,
     temp_dir: &Path,
@@ -1411,7 +1711,7 @@ pub fn sign_workflow(
     let extracted = unzip_ipa(ipa_path)?;
     let extracted_bundle_id = extract_bundle_id(&extracted.app_path)?;
     adapter.emit(WorkflowEvent::ExtractedBundle {
-        bundle_id: extracted_bundle_id,
+        bundle_id: extracted_bundle_id.clone(),
         app_name: extracted
             .app_path
             .file_name()
@@ -1421,7 +1721,16 @@ pub fn sign_workflow(
     })?;
 
     let identities = list_signing_identities()?;
-    let identity = select_signing_identity(&identities, identity_override, adapter)?;
+    let available_profiles = find_provisioning_profiles().unwrap_or_default();
+    let identity = select_signing_identity_for_bundle(
+        config,
+        &identities,
+        &available_profiles,
+        &extracted_bundle_id,
+        device_udid,
+        identity_override,
+        adapter,
+    )?;
     adapter.emit(WorkflowEvent::UsingIdentity {
         identity_name: identity.name.clone(),
     })?;
@@ -1547,6 +1856,24 @@ pub fn sign_workflow(
 mod tests {
     use super::*;
     use crate::core::config::{Config, SigningConfig};
+    use crate::core::interaction::WorkflowEvent;
+
+    struct TestAdapter;
+
+    impl WorkflowAdapter for TestAdapter {
+        fn emit(&mut self, _event: WorkflowEvent) -> Result<()> {
+            Ok(())
+        }
+
+        fn choose(
+            &mut self,
+            _title: &str,
+            _items: &[String],
+            _default: usize,
+        ) -> Result<Option<usize>> {
+            Ok(Some(0))
+        }
+    }
 
     #[test]
     fn temp_bundle_id_is_stable_and_prefixed() {
@@ -1647,5 +1974,40 @@ mod tests {
         assert_eq!(merged_obj.get("aps-environment").unwrap(), "development");
         assert!(merged_obj.contains_key("application-identifier"));
         assert!(!merged_obj.contains_key("com.apple.developer.associated-domains"));
+    }
+
+    #[test]
+    fn select_identity_prefers_team_from_config_when_available() {
+        let config = Config {
+            signing: SigningConfig {
+                temp_bundle_prefix: Some("cn.yangym.tmp".into()),
+                team_id: Some("VLXZVT5H87".into()),
+            },
+            ..Config::default()
+        };
+        let identities = vec![
+            SigningIdentity {
+                hash: "1111111111111111111111111111111111111111".into(),
+                name: "Apple Development: 44901560@qq.com (FRR2796948)".into(),
+            },
+            SigningIdentity {
+                hash: "2222222222222222222222222222222222222222".into(),
+                name: "Apple Development: 44901560@qq.com (VLXZVT5H87)".into(),
+            },
+        ];
+        let mut adapter = TestAdapter;
+
+        let selected = select_signing_identity_for_bundle(
+            &config,
+            &identities,
+            &[],
+            "com.example.kazumi",
+            "00008130-0014055036C0001C",
+            None,
+            &mut adapter,
+        )
+        .unwrap();
+
+        assert!(selected.name.contains("(VLXZVT5H87)"));
     }
 }

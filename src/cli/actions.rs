@@ -3,6 +3,7 @@ use std::path::Path;
 use console::Style;
 
 use crate::cli::adapters::StrictCliAdapter;
+use crate::cli::signing;
 use crate::core::actions;
 use crate::core::config::Config;
 use crate::core::error::Result;
@@ -13,7 +14,13 @@ pub fn install(
     device: Option<&str>,
     prebuilt: bool,
     verbose: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        let mut adapter = StrictCliAdapter;
+        let project_name = actions::resolve_project_name(config, project, &mut adapter)?;
+        return signing::preview_project_install(config, &project_name, device, prebuilt, false);
+    }
     let mut adapter = StrictCliAdapter;
     let result = actions::install(
         config,
@@ -52,7 +59,13 @@ pub fn run(
     device: Option<&str>,
     prebuilt: bool,
     verbose: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        let mut adapter = StrictCliAdapter;
+        let project_name = actions::resolve_project_name(config, project, &mut adapter)?;
+        return signing::preview_project_install(config, &project_name, device, prebuilt, true);
+    }
     let mut adapter = StrictCliAdapter;
     let result = actions::run(
         config,
@@ -79,7 +92,17 @@ pub fn sign(
     identity: Option<&str>,
     profile: Option<&str>,
     launch: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        return signing::preview_ipa_install(
+            config,
+            Path::new(ipa),
+            device,
+            identity,
+            profile,
+        );
+    }
     let mut adapter = StrictCliAdapter;
     let result = actions::sign_ipa(
         config,

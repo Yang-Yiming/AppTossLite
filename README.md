@@ -65,15 +65,18 @@ toss devices alias <UDID> phone
 ```bash
 # Install + launch (uses defaults if omitted)
 toss run [project] [-d device]
+toss run [project] [-d device] [--dry-run]
 
 # Install only
 toss install [project] [-d device]
+toss install [project] [-d device] [--dry-run]
 
 # Launch only (IPA projects should use `run`)
 toss launch [project] [-d device]
 
 # Direct one-off IPA signing still exists
 toss sign /path/to/app.ipa [-d device] [--launch]
+toss sign /path/to/app.ipa [-d device] [--launch] [--dry-run]
 ```
 
 ### Config
@@ -103,6 +106,22 @@ toss cleanup
 
 # Run environment diagnostics
 toss doctor
+```
+
+### Signing
+
+```bash
+# List codesigning identities from the keychain
+toss signing identities
+
+# List local provisioning profiles parsed from Xcode caches
+toss signing profiles
+
+# Show team IDs seen in config, identities, and profiles
+toss signing teams
+
+# Diagnose signing readiness for an IPA project
+toss signing doctor [project] [-d device]
 ```
 
 ### Interactive Mode
